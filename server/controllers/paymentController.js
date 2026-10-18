@@ -1,0 +1,246 @@
+const crypto = require('crypto');
+const Razorpay = require('razorpay');
+const Booking = require('../models/bookingModel');
+const Show = require('../models/showModel');
+const { sendBookingConfirmation } = require('../utils/mailer');
+const { sendTicketEmail } = require('../services/emailService');
+
+/**
+ * Initialize Razorpay instance safely
+ */
+const getRazorpayInstance = () => {
+  const key_id = process.env.RAZORPAY_KEY_ID;
+  const key_secret = process.env.RAZORPAY_KEY_SECRET;
+
+  if (!key_id || !key_secret) {
+    throw new Error('Razorpay API keys (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET) are not configured');
+  }
+
+  return new Razorpay({ key_id, key_secret });
+};
+
+/**
+ * Safely access socket.io instance
+ */
+const getIO = (req) => {
+  return req.app.get('io') || global.io || null;
+};
+
+/**
+ * Step 2 & 3: Create Razorpay Order
+ * POST /api/payment/create-order
+ * Request Body: { bookingId, amount, currency }
+ */
+const createOrder = async (req, res) => {
+  try {
+    const { bookingId, amount, currency = 'INR' } = req.body;
+
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid payment amount is required'
+      });
+    }
+
+    const razorpay = getRazorpayInstance();
+
+    // Convert amount to the smallest currency unit (paise for INR: 1 INR = 100 paise)
+    const amountInPaise = Math.round(Number(amount) * 100);
+
+    const receiptId = `rcpt_${(bookingId || Date.now()).toString().slice(-30)}`;
+
+    const options = {
+      amount: amountInPaise,
+      currency,
+      receipt: receiptId,
+      notes: {
+        bookingId: bookingId || '',
+        userEmail: req.user?.email || req.body.userEmail || ''
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    // If a bookingId was provided, attach razorpayOrderId to the booking document
+    if (bookingId) {
+      await Booking.findOneAndUpdate(
+        { bookingId },
+        { razorpayOrderId: order.id, totalAmount: Number(amount) },
+        { new: true }
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      key: process.env.RAZORPAY_KEY_ID,
+      order
+    });
+  } catch (error) {
+    console.error('[Razorpay createOrder Error]:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create Razorpay order'
+    });
+  }
+};
+
+/**
+ * Step 4: Verify Cryptographic Signature and Finalize Booking
+ * POST /api/payment/verify
+ * Request Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId }
+ */
+const verifyPayment = async (req, res) => {
+  try {
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      bookingId
+    } = req.body;
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing Razorpay verification parameters (order_id, payment_id, or signature)'
+      });
+    }
+
+    const key_secret = process.env.RAZORPAY_KEY_SECRET;
+    if (!key_secret) {
+      return res.status(500).json({
+        success: false,
+        error: 'RAZORPAY_KEY_SECRET is not configured on the server'
+      });
+    }
+
+    // Cryptographic HMAC SHA256 Signature Verification
+    const body = `${razorpay_order_id}|${razorpay_payment_id}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', key_secret)
+      .update(body)
+      .digest('hex');
+
+    const isAuthentic = expectedSignature === razorpay_signature;
+
+    if (!isAuthentic) {
+      // If signature is invalid, mark booking as Failed if it exists
+      if (bookingId) {
+        await Booking.findOneAndUpdate({ bookingId }, { paymentStatus: 'Failed' });
+      }
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid payment signature. Verification failed.'
+      });
+    }
+
+    // Locate booking record by bookingId or razorpayOrderId
+    let booking = null;
+    if (bookingId) {
+      booking = await Booking.findOne({ bookingId });
+    }
+    if (!booking && razorpay_order_id) {
+      booking = await Booking.findOne({ razorpayOrderId: razorpay_order_id });
+    }
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        error: 'Associated booking record not found'
+      });
+    }
+
+    // Update booking status to Completed with Razorpay transaction details
+    booking.paymentStatus = 'Completed';
+    booking.paymentMethod = 'Razorpay';
+    booking.razorpayOrderId = razorpay_order_id;
+    booking.razorpayPaymentId = razorpay_payment_id;
+    booking.razorpaySignature = razorpay_signature;
+    const updatedBooking = await booking.save();
+
+    // Ensure the seats on the corresponding Show are set to 'booked'
+    if (booking.showId && Array.isArray(booking.selectedSeats) && booking.selectedSeats.length > 0) {
+      const show = await Show.findOne({ showId: booking.showId });
+      if (show && show.tickets) {
+        for (const seatId of booking.selectedSeats) {
+          if (show.tickets[seatId]) {
+            show.tickets[seatId] = {
+              ...show.tickets[seatId],
+              status: 'booked',
+              bookedBy: booking.userEmail
+            };
+            delete show.tickets[seatId].lockExpiry;
+            delete show.tickets[seatId].lockedBy;
+          }
+        }
+        show.markModified('tickets');
+        await show.save();
+
+        // Emit real-time WebSocket event
+        const io = getIO(req);
+        if (io) {
+          io.to(show.showId).emit('seats:booked', {
+            showId: show.showId,
+            selectedSeats: booking.selectedSeats,
+            userEmail: booking.userEmail,
+            bookingId: booking.bookingId,
+            tickets: show.tickets
+          });
+          io.emit('show:updated', {
+            showId: show.showId,
+            tickets: show.tickets
+          });
+        }
+      }
+    }
+
+    // Step 5: Send automated email ticket confirmation using emailService
+    try {
+      const recipientEmail = booking.userEmail || req.user?.email;
+      if (recipientEmail) {
+        await sendTicketEmail(recipientEmail, {
+          bookingId: booking.bookingId,
+          movieTitle: booking.movieName,
+          theatre: booking.theatreName,
+          showDate: booking.showDate,
+          showTime: booking.showTime,
+          seatNumbers: booking.selectedSeats,
+          totalAmount: booking.totalAmount
+        });
+      }
+    } catch (emailErr) {
+      console.warn('[Payment Controller Ticket Email Note]:', emailErr.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Payment verified and booking confirmed successfully',
+      booking: updatedBooking
+    });
+  } catch (error) {
+    console.error('[Razorpay verifyPayment Error]:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Payment verification failed'
+    });
+  }
+};
+
+/**
+ * Get Public Razorpay Key for Frontend Client
+ * GET /api/payment/key
+ */
+const getPaymentKey = (req, res) => {
+  return res.status(200).json({
+    success: true,
+    key: process.env.RAZORPAY_KEY_ID || ''
+  });
+};
+
+module.exports = {
+  createOrder,
+  verifyPayment,
+  getPaymentKey
+};
