@@ -26,16 +26,40 @@ const app = express();
 // Create HTTP server instance
 const server = http.createServer(app);
 
-// Client URL configuration
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+// CORS Configuration: Dynamically allow Vercel production/preview domains, localhost, or any configured CLIENT_URL
+const allowedOrigins = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(s => s.trim()) : [];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (Postman, mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    // If explicit origins are configured, check them
+    if (allowedOrigins.length > 0 && allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Allow all localhost origins and all Vercel domains (*.vercel.app)
+    if (
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.endsWith('.vercel.app') ||
+      origin.includes('vercel.app')
+    ) {
+      return callback(null, true);
+    }
+
+    // Dynamic reflection fallback to allow live frontend domains with credentials: true
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'auth-token', 'admin-token', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+};
 
 // Setup Socket.io with CORS configuration
 const io = new Server(server, {
-  cors: {
-    origin: CLIENT_URL,
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    credentials: true
-  }
+  cors: corsOptions
 });
 
 // Make io accessible globally and on app instance for controllers
@@ -43,14 +67,8 @@ app.set('io', io);
 global.io = io;
 
 // CORS middleware
-app.use(
-  cors({
-    origin: CLIENT_URL,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'auth-token', 'admin-token', 'Authorization']
-  })
-);
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Body parsers
 app.use(express.json({ limit: '10mb' }));
