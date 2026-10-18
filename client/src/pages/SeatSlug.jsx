@@ -94,10 +94,15 @@ export default function SeatSlug() {
 
   // Connect to Socket.IO server & join room
   useEffect(() => {
+    const backendHost =
+      import.meta.env.VITE_SOCKET_URL ||
+      (import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, '') : '') ||
+      'https://imovies1802.onrender.com';
+
     const socketHost =
       window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-        ? `${window.location.protocol}//localhost:5000`
-        : window.location.origin;
+        ? (import.meta.env.VITE_SOCKET_URL || `${window.location.protocol}//localhost:5000`)
+        : backendHost;
     const socket = io(socketHost, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5
