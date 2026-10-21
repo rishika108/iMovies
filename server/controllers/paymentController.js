@@ -123,12 +123,40 @@ const verifyPayment = async (req, res) => {
       .update(body)
       .digest('hex');
 
-    const isAuthentic = expectedSignature === razorpay_signature;
+    let isAuthentic = false;
+    try {
+      const expBuf = Buffer.from(expectedSignature, 'utf-8');
+      const sigBuf = Buffer.from(razorpay_signature, 'utf-8');
+      if (expBuf.length === sigBuf.length && crypto.timingSafeEqual(expBuf, sigBuf)) {
+        isAuthentic = true;
+      }
+    } catch (e) {
+      isAuthentic = false;
+    }
 
     if (!isAuthentic) {
-      // If signature is invalid, mark booking as Failed if it exists
+      // If signature is invalid, mark booking as Failed and release temporary seat holds
       if (bookingId) {
-        await Booking.findOneAndUpdate({ bookingId }, { paymentStatus: 'Failed' });
+        const failedBooking = await Booking.findOneAndUpdate(
+          { bookingId },
+          { paymentStatus: 'Failed' },
+          { new: true }
+        );
+        if (failedBooking && failedBooking.showId && Array.isArray(failedBooking.selectedSeats)) {
+          const show = await Show.findOne({ showId: failedBooking.showId });
+          if (show && show.tickets) {
+            for (const seatId of failedBooking.selectedSeats) {
+              if (show.tickets[seatId] && show.tickets[seatId].status === 'locked') {
+                show.tickets[seatId].status = 'available';
+                delete show.tickets[seatId].lockExpiry;
+                delete show.tickets[seatId].lockedBy;
+                delete show.tickets[seatId].bookingId;
+              }
+            }
+            show.markModified('tickets');
+            await show.save();
+          }
+        }
       }
       return res.status(400).json({
         success: false,
