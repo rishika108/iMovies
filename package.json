@@ -11,6 +11,7 @@
     "start": "npm --prefix server start",
     "install:server": "npm --prefix server install",
     "install:client": "npm --prefix client install",
-    "dev": "npm --prefix server run dev"
+    "dev": "npm --prefix server run dev",
+    "test:mcp": "npm --prefix server run test:mcp"
   }
 }
