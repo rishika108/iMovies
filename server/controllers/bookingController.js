@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const Booking = require('../models/bookingModel');
 const Show = require('../models/showModel');
 const { sendBookingConfirmation } = require('../utils/mailer');
-const { sendTicketEmail } = require('../services/emailService');
+const { sendBookingConfirmationEmail, sendTicketEmail } = require('../services/emailService');
 
 /**
  * Helper to obtain Socket.IO instance from req or global
@@ -371,12 +371,23 @@ const confirmPayment = async (req, res) => {
       });
     }
 
-    // Prevent double confirmation
+    // Prevent double confirmation while ensuring idempotent email dispatch
     if (booking.paymentStatus === 'Completed') {
+      let emailNotification = {
+        status: booking.confirmationEmailStatus === 'sent' ? 'sent' : 'already_processed'
+      };
+      if (booking.confirmationEmailStatus !== 'sent') {
+        const emailRes = await sendBookingConfirmationEmail(booking.bookingId);
+        emailNotification = {
+          status: emailRes.status || (emailRes.success ? 'sent' : 'failed'),
+          messageId: emailRes.messageId || null
+        };
+      }
       return res.status(200).json({
         success: true,
         message: 'Booking is already confirmed',
-        booking
+        booking,
+        emailNotification
       });
     }
 
@@ -474,27 +485,26 @@ const confirmPayment = async (req, res) => {
       }
     }
 
-    // Send confirmation email asynchronously
+    // Send confirmation email via SendGrid emailService
+    let emailNotification = { status: 'pending' };
     try {
-      if (booking.userEmail) {
-        await sendTicketEmail(booking.userEmail, {
-          bookingId: booking.bookingId,
-          movieTitle: booking.movieName,
-          theatre: booking.theatreName,
-          showDate: booking.showDate,
-          showTime: booking.showTime,
-          seatNumbers: booking.selectedSeats,
-          totalAmount: booking.totalAmount
-        });
-      }
+      const emailResult = await sendBookingConfirmationEmail(booking.bookingId);
+      emailNotification = {
+        status: emailResult.status || (emailResult.success ? 'sent' : (emailResult.alreadySent ? 'sent' : 'failed')),
+        messageId: emailResult.messageId || null
+      };
     } catch (emailErr) {
       console.error('Failed to send confirmation email in confirmPayment:', emailErr);
+      emailNotification = { status: 'failed', error: 'Email service temporary failure' };
     }
+
+    const finalBooking = await Booking.findOne({ bookingId: booking.bookingId });
 
     return res.status(200).json({
       success: true,
       message: 'Payment verified and booking confirmed successfully',
-      booking: updatedBooking
+      booking: finalBooking || updatedBooking,
+      emailNotification
     });
   } catch (error) {
     console.error('Error in confirmPayment:', error);

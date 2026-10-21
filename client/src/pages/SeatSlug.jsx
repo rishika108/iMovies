@@ -457,6 +457,9 @@ export default function SeatSlug() {
             if (verifyRes.data && verifyRes.data.success) {
               // Step 5: Confirmation & Redirection
               toast.success('🎉 Payment Verified! Your movie tickets are confirmed.');
+              if (verifyRes.data.emailNotification?.status === 'sent') {
+                toast.info('📧 Confirmation email sent to your inbox.');
+              }
               setIsLocked(false);
               navigate('/bookings');
             } else {

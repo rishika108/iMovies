@@ -87,6 +87,46 @@ const bookingSchema = new mongoose.Schema({
     type: String,
     trim: true,
     default: ''
+  },
+  customerName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  screen: {
+    type: String,
+    trim: true,
+    default: 'Screen 1'
+  },
+  posterUrl: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  confirmationEmailSent: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  confirmationEmailStatus: {
+    type: String,
+    enum: ['not_sent', 'pending', 'sending', 'sent', 'failed'],
+    default: 'not_sent',
+    index: true
+  },
+  confirmationEmailSentAt: {
+    type: Date,
+    default: null
+  },
+  confirmationEmailMessageId: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  confirmationEmailError: {
+    type: String,
+    trim: true,
+    default: ''
   }
 }, { timestamps: true });
 

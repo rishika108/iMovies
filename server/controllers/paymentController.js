@@ -3,7 +3,7 @@ const Razorpay = require('razorpay');
 const Booking = require('../models/bookingModel');
 const Show = require('../models/showModel');
 const { sendBookingConfirmation } = require('../utils/mailer');
-const { sendTicketEmail } = require('../services/emailService');
+const { sendBookingConfirmationEmail, sendTicketEmail } = require('../services/emailService');
 
 /**
  * Initialize Razorpay instance safely
@@ -180,6 +180,45 @@ const verifyPayment = async (req, res) => {
       });
     }
 
+    // Ownership check (BOLA/IDOR protection)
+    const requesterEmail = req.user?.email ? req.user.email.trim().toLowerCase() : null;
+    const isAdmin = req.user?.role === 'admin' || req.admin?.role === 'admin';
+    const bookingUserEmail = booking.userEmail ? booking.userEmail.trim().toLowerCase() : null;
+    if (!isAdmin && requesterEmail && bookingUserEmail && requesterEmail !== bookingUserEmail) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: You do not have permission to verify or modify this booking'
+      });
+    }
+
+    // Order ID consistency check
+    if (booking.razorpayOrderId && booking.razorpayOrderId !== razorpay_order_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Order mismatch: razorpay_order_id does not match the booking order'
+      });
+    }
+
+    // Handle duplicate confirmation idempotently
+    if (booking.paymentStatus === 'Completed') {
+      let emailNotification = {
+        status: booking.confirmationEmailStatus === 'sent' ? 'sent' : 'already_processed'
+      };
+      if (booking.confirmationEmailStatus !== 'sent') {
+        const emailRes = await sendBookingConfirmationEmail(booking.bookingId);
+        emailNotification = {
+          status: emailRes.status || (emailRes.success ? 'sent' : 'failed'),
+          messageId: emailRes.messageId || null
+        };
+      }
+      return res.status(200).json({
+        success: true,
+        message: 'Payment was already verified and booking is confirmed',
+        booking,
+        emailNotification
+      });
+    }
+
     // Update booking status to Completed with Razorpay transaction details
     booking.paymentStatus = 'Completed';
     booking.paymentMethod = 'Razorpay';
@@ -224,28 +263,26 @@ const verifyPayment = async (req, res) => {
       }
     }
 
-    // Step 5: Send automated email ticket confirmation using emailService
+    // Step 5: Send automated email ticket confirmation using SendGrid emailService
+    let emailNotification = { status: 'pending' };
     try {
-      const recipientEmail = booking.userEmail || req.user?.email;
-      if (recipientEmail) {
-        await sendTicketEmail(recipientEmail, {
-          bookingId: booking.bookingId,
-          movieTitle: booking.movieName,
-          theatre: booking.theatreName,
-          showDate: booking.showDate,
-          showTime: booking.showTime,
-          seatNumbers: booking.selectedSeats,
-          totalAmount: booking.totalAmount
-        });
-      }
+      const emailResult = await sendBookingConfirmationEmail(booking.bookingId);
+      emailNotification = {
+        status: emailResult.status || (emailResult.success ? 'sent' : (emailResult.alreadySent ? 'sent' : 'failed')),
+        messageId: emailResult.messageId || null
+      };
     } catch (emailErr) {
       console.warn('[Payment Controller Ticket Email Note]:', emailErr.message);
+      emailNotification = { status: 'failed', error: 'Email service temporary failure' };
     }
+
+    const finalBooking = await Booking.findOne({ bookingId: booking.bookingId });
 
     return res.status(200).json({
       success: true,
       message: 'Payment verified and booking confirmed successfully',
-      booking: updatedBooking
+      booking: finalBooking || updatedBooking,
+      emailNotification
     });
   } catch (error) {
     console.error('[Razorpay verifyPayment Error]:', error);
