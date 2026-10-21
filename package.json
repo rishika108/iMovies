@@ -1,0 +1,16 @@
+{
+  "name": "imovies",
+  "version": "1.0.0",
+  "private": true,
+  "description": "iMovies Cinema Platform - MERN Fullstack Application",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "npm --prefix server install",
+    "start": "npm --prefix server start",
+    "install:server": "npm --prefix server install",
+    "install:client": "npm --prefix client install",
+    "dev": "npm --prefix server run dev"
+  }
+}

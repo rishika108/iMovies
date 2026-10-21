@@ -163,8 +163,8 @@ mongoose
 
     // Start HTTP and WebSocket listener
     if (process.env.NODE_ENV !== 'test') {
-      server.listen(PORT, () => {
-        console.log(`iMovies server listening on port ${PORT}`);
+      server.listen(PORT, '0.0.0.0', () => {
+        console.log(`iMovies server listening on port ${PORT} (0.0.0.0)`);
       });
     }
   })
