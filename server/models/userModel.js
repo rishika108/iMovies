@@ -17,7 +17,7 @@ const userSchema = new mongoose.Schema({
     trim: true,
     lowercase: true
   },
-    password: {
+  password: {
     type: String,
     required: true,
     minlength: 6
@@ -26,6 +26,41 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['user', 'admin'],
     default: 'user'
+  },
+  isVerified: {
+    type: Boolean,
+    default: false
+  },
+  verificationToken: {
+    type: String,
+    default: null,
+    index: true
+  },
+  verificationTokenExpires: {
+    type: Date,
+    default: null
+  },
+  resetPasswordToken: {
+    type: String,
+    default: null,
+    index: true
+  },
+  resetPasswordExpires: {
+    type: Date,
+    default: null
+  },
+  emailStatus: {
+    type: String,
+    enum: ['valid', 'hard_bounce', 'soft_bounce', 'spam', 'blocked', 'unsubscribed'],
+    default: 'valid'
+  },
+  bouncedAt: {
+    type: Date,
+    default: null
+  },
+  bounceReason: {
+    type: String,
+    default: null
   }
 }, { timestamps: true });
 

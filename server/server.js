@@ -23,6 +23,7 @@ const reviewRoutes = require('./routes/reviewRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const emailRoutes = require('./routes/emailRoutes');
+const webhookRoutes = require('./routes/webhookRoutes');
 
 // Import background services
 const { startCleanupService } = require('./utils/cleanupService');
@@ -110,6 +111,7 @@ app.use('/api/reviews', reviewRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 // Socket.io connection and room event handlers
 io.on('connection', (socket) => {

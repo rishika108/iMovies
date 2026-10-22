@@ -9,6 +9,7 @@
     "dev": "nodemon server.js",
     "test:email": "node test_email_integration.js",
     "test:brevo": "node scripts/test-brevo-email.js",
+    "test:auth": "node scripts/test-auth-and-webhooks.js",
     "test:mcp": "node scripts/test-render-mcp.js"
   },
   "engines": {
