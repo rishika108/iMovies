@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const Booking = require('../models/bookingModel');
 const Show = require('../models/showModel');
 const { sendBookingConfirmation } = require('../utils/mailer');
-const { sendBookingConfirmationEmail, sendTicketEmail } = require('../services/emailService');
+const { sendBookingConfirmationEmail, sendBookingStatusUpdateEmail, sendTicketEmail } = require('../services/emailService');
 
 /**
  * Helper to obtain Socket.IO instance from req or global
@@ -599,6 +599,17 @@ const cancelBooking = async (req, res) => {
           tickets: show.tickets
         });
       }
+    }
+
+    // Automatically trigger cancellation notification email via Brevo
+    if (booking.userEmail) {
+      sendBookingStatusUpdateEmail(booking.userEmail, {
+        status: 'Cancelled',
+        bookingId: booking.bookingId,
+        movieTitle: booking.movieName || 'Movie Booking',
+        message: `Your booking (${booking.bookingId}) has been cancelled and the reserved seats have been released.`,
+        refundAmount: booking.totalAmount
+      }).catch(mailErr => console.warn('[cancelBooking] Brevo cancellation status email notice:', mailErr.message));
     }
 
     return res.status(200).json({

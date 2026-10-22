@@ -112,24 +112,11 @@ const registerUser = async (req, res) => {
         console.error(`[authController.registerUser] Exception sending verification email:`, mailErr.message);
       });
 
-    // Sign JWT with role: 'user'
-    const payload = {
-      user: {
-        id: savedUser._id,
-        email: savedUser.email,
-        username: savedUser.username,
-        role: 'user',
-        isVerified: false
-      },
-      role: 'user'
-    };
-
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
-
     return res.status(201).json({
       success: true,
-      message: 'Account created successfully! A verification link has been sent to your email.',
-      token,
+      requiresVerification: true,
+      message: 'Account created successfully! We have sent an authentication link to your email. Please verify your email to activate your account.',
+      email: savedUser.email,
       user: {
         id: savedUser._id,
         email: savedUser.email,
@@ -440,7 +427,17 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Sign JWT
+    // Enforce email authentication: without verification, user cannot log in
+    if (user.isVerified === false) {
+      return res.status(403).json({
+        success: false,
+        isVerified: false,
+        error: 'Email verification required. Please check your inbox and verify your email before logging in.',
+        email: user.email
+      });
+    }
+
+    // Sign JWT payload for authenticated user
     const payload = {
       user: {
         id: user._id,
@@ -647,7 +644,7 @@ const loginAdmin = async (req, res) => {
       });
     }
 
-    // Sign JWT
+    // Sign Admin JWT payload
     const payload = {
       admin: {
         id: admin._id,

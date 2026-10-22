@@ -24,6 +24,8 @@ const AddShow = lazy(() => import('./pages/AddShow'));
 const AddAdmin = lazy(() => import('./pages/AddAdmin'));
 const AdminBookings = lazy(() => import('./pages/AdminBookings'));
 const AdminTransactions = lazy(() => import('./pages/AdminTransactions'));
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 
 export default function App() {
   return (
@@ -36,6 +38,8 @@ export default function App() {
             <Route path="/landing" element={<Landing />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             {/* User Protected Routes */}
             <Route
               path="/home"
