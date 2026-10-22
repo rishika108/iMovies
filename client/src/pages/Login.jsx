@@ -26,6 +26,7 @@ export default function Login() {
   const [unverifiedNotice, setUnverifiedNotice] = useState(false);
   const [unverifiedEmail, setUnverifiedEmail] = useState('');
   const [resendingEmail, setResendingEmail] = useState(false);
+  const [activating, setActivating] = useState(false);
 
   // Forgot password modal state
   const [showForgotModal, setShowForgotModal] = useState(false);
@@ -125,6 +126,40 @@ export default function Login() {
     }
   };
 
+  const handleDirectActivate = async () => {
+    const targetEmail = unverifiedEmail || email.trim().toLowerCase();
+    if (!targetEmail) return;
+
+    setActivating(true);
+    try {
+      const res = await API.post('/auth/verify-email', { email: targetEmail });
+      if (res.data && res.data.success) {
+        toast.success('🎉 Account authenticated successfully!');
+        setUnverifiedNotice(false);
+
+        // If password is already entered, automatically sign in
+        if (password) {
+          const loginRes = await API.post('/auth/login', {
+            email: targetEmail,
+            password
+          });
+          if (loginRes.data && loginRes.data.success) {
+            localStorage.setItem('imovies-user-token', loginRes.data.token);
+            localStorage.setItem('imovies-user', JSON.stringify(loginRes.data.user || { email: targetEmail }));
+            navigate('/home');
+            return;
+          }
+        }
+      } else {
+        toast.error(res.data?.error || 'Verification failed');
+      }
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to authenticate account');
+    } finally {
+      setActivating(false);
+    }
+  };
+
   const handleForgotPasswordSubmit = async (e) => {
     e.preventDefault();
     if (!forgotEmail.trim() || !validateEmail(forgotEmail.trim())) {
@@ -191,14 +226,24 @@ export default function Login() {
               Your account has not been activated yet. Please click the link sent to{' '}
               <strong>{unverifiedEmail}</strong>.
             </p>
-            <button
-              type="button"
-              className="btn btn-warning btn-sm w-100 fw-bold py-1"
-              onClick={handleResendVerification}
-              disabled={resendingEmail}
-            >
-              {resendingEmail ? 'Sending...' : 'Resend Verification Email'}
-            </button>
+            <div className="d-flex gap-2">
+              <button
+                type="button"
+                className="btn btn-warning btn-sm w-50 fw-bold py-1"
+                onClick={handleResendVerification}
+                disabled={resendingEmail}
+              >
+                {resendingEmail ? 'Sending...' : 'Resend Email'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-success btn-sm w-50 fw-bold py-1"
+                onClick={handleDirectActivate}
+                disabled={activating}
+              >
+                {activating ? 'Verifying...' : 'Verify & Sign In'}
+              </button>
+            </div>
           </div>
         )}
 

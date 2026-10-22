@@ -7,7 +7,7 @@ const {
   sendVerificationEmail,
   sendPasswordResetEmail
 } = require('../services/emailService');
-const { CLIENT_URL } = require('../config/brevoConfig');
+const { CLIENT_URL, isConfigured } = require('../config/brevoConfig');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || !JWT_SECRET.trim()) {
@@ -83,46 +83,79 @@ const registerUser = async (req, res) => {
     const verificationToken = crypto.randomBytes(32).toString('hex');
     const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    // SECURITY ENFORCEMENT: Force role to strictly 'user' and isVerified to false
+    // Check if Brevo email service is active on this host
+    const emailServiceActive = isConfigured();
+
+    // If email service is active, require verification; otherwise auto-verify to prevent locking out users
+    const isVerified = !emailServiceActive;
+
     const newUser = new User({
       username: normalizedUsername,
       email: normalizedEmail,
       password: hashedPassword,
       role: 'user',
-      isVerified: false,
-      verificationToken,
-      verificationTokenExpires,
+      isVerified,
+      verificationToken: emailServiceActive ? verificationToken : null,
+      verificationTokenExpires: emailServiceActive ? verificationTokenExpires : null,
       emailStatus: 'valid'
     });
 
     const savedUser = await newUser.save();
-    console.log(`[authController.registerUser] Created user: ${savedUser.email} (ID: ${savedUser._id})`);
+    console.log(`[authController.registerUser] Created user: ${savedUser.email} (ID: ${savedUser._id}, isVerified: ${isVerified})`);
 
-    // Asynchronously dispatch verification email via Brevo
-    // Handled non-blockingly so intermittent email latency does not stall registration
-    sendVerificationEmail(savedUser.email, verificationToken, savedUser.username)
-      .then((mailRes) => {
-        if (mailRes.success) {
-          console.log(`[authController.registerUser] Verification email dispatched to ${savedUser.email} (MsgID: ${mailRes.messageId})`);
-        } else {
-          console.warn(`[authController.registerUser] Failed to send verification email to ${savedUser.email}:`, mailRes.error);
+    // If email service is configured, dispatch verification email
+    if (emailServiceActive) {
+      sendVerificationEmail(savedUser.email, verificationToken, savedUser.username)
+        .then((mailRes) => {
+          if (mailRes.success) {
+            console.log(`[authController.registerUser] Verification email dispatched to ${savedUser.email} (MsgID: ${mailRes.messageId})`);
+          } else {
+            console.warn(`[authController.registerUser] Failed to send verification email to ${savedUser.email}:`, mailRes.error);
+          }
+        })
+        .catch((mailErr) => {
+          console.error(`[authController.registerUser] Exception sending verification email:`, mailErr.message);
+        });
+
+      return res.status(201).json({
+        success: true,
+        requiresVerification: true,
+        message: 'Account created successfully! We have sent an authentication link to your email. Please verify your email to activate your account.',
+        email: savedUser.email,
+        user: {
+          id: savedUser._id,
+          email: savedUser.email,
+          username: savedUser.username,
+          role: 'user',
+          isVerified: false
         }
-      })
-      .catch((mailErr) => {
-        console.error(`[authController.registerUser] Exception sending verification email:`, mailErr.message);
       });
+    }
 
-    return res.status(201).json({
-      success: true,
-      requiresVerification: true,
-      message: 'Account created successfully! We have sent an authentication link to your email. Please verify your email to activate your account.',
-      email: savedUser.email,
+    // Email service not configured on host: auto-authenticate and issue token
+    const payload = {
       user: {
         id: savedUser._id,
         email: savedUser.email,
         username: savedUser.username,
         role: 'user',
-        isVerified: false
+        isVerified: true
+      },
+      role: 'user'
+    };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+
+    return res.status(201).json({
+      success: true,
+      requiresVerification: false,
+      message: 'Account created and verified successfully!',
+      token,
+      user: {
+        id: savedUser._id,
+        email: savedUser.email,
+        username: savedUser.username,
+        role: 'user',
+        isVerified: true
       }
     });
   } catch (error) {
@@ -486,6 +519,15 @@ const loginUser = async (req, res) => {
       user.isVerified = true;
       await user.save();
       console.log(`[authController.loginUser] Migrated legacy user to verified: ${user.email}`);
+    }
+
+    // Fallback: If Brevo email service is not configured on this host (e.g. Render missing BREVO_API_KEY),
+    // auto-activate user upon valid password match so they are never permanently trapped
+    if (user.isVerified === false && !isConfigured()) {
+      user.isVerified = true;
+      user.verificationToken = null;
+      await user.save();
+      console.log(`[authController.loginUser] Auto-activated unverified user ${user.email} (Email service offline on this host)`);
     }
 
     // Enforce email authentication: without verification, user cannot log in
