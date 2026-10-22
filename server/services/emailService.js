@@ -14,6 +14,7 @@
  * 5. Sanitized HTML rendering to prevent injection
  */
 
+const mongoose = require('mongoose');
 const { brevoClient, SENDER_EMAIL, SENDER_NAME, CLIENT_URL, isConfigured } = require('../config/brevoConfig');
 const Booking = require('../models/bookingModel');
 const Movie = require('../models/movieModel');
@@ -428,16 +429,26 @@ This link is valid for 1 hour. If you didn't request a password reset, you can s
  * @param {string|object} emailOrBookingId
  * @param {object} [bookingDetails]
  */
-const sendBookingConfirmationEmail = async (emailOrBookingId, bookingDetails = null) => {
-  // Case A: Called with bookingId string or object that queries MongoDB
-  if (!bookingDetails && (typeof emailOrBookingId === 'string' || (emailOrBookingId && emailOrBookingId.bookingId))) {
-    const bookingId = typeof emailOrBookingId === 'string' ? emailOrBookingId.trim() : emailOrBookingId.bookingId;
-    return await _processDatabaseBookingConfirmation(bookingId);
+const sendBookingConfirmationEmail = async (param1, param2 = null) => {
+  // Case A: Passed an object with bookingId
+  if (param1 && typeof param1 === 'object') {
+    if (param1.bookingId) {
+      return await _processDatabaseBookingConfirmation(param1.bookingId);
+    }
   }
 
-  // Case B: Direct invocation with (email, bookingDetails)
-  const recipientEmail = typeof emailOrBookingId === 'string' ? emailOrBookingId : (bookingDetails?.userEmail || '');
-  return await _sendDirectBookingConfirmation(recipientEmail, bookingDetails || {});
+  // Case B: Passed a string (either email or bookingId)
+  if (typeof param1 === 'string') {
+    const trimmed = param1.trim();
+    if (trimmed.includes('@')) {
+      const details = (param2 && typeof param2 === 'object') ? param2 : {};
+      return await _sendDirectBookingConfirmation(trimmed, details);
+    } else {
+      return await _processDatabaseBookingConfirmation(trimmed);
+    }
+  }
+
+  return { success: false, error: 'Invalid parameters provided to sendBookingConfirmationEmail' };
 };
 
 /**
@@ -453,104 +464,154 @@ const _processDatabaseBookingConfirmation = async (bookingId) => {
     return { success: false, skipped: true, reason: `Payment status is ${booking.paymentStatus}` };
   }
 
-  // Idempotency check
+  // Idempotency check: if already sent successfully, return immediately
   if (booking.confirmationEmailSent === true || booking.confirmationEmailStatus === 'sent') {
     return {
       success: true,
       alreadySent: true,
+      status: 'sent',
       messageId: booking.confirmationEmailMessageId,
       message: 'Booking confirmation email was already delivered'
     };
   }
 
-  // Atomic claim
+  // Atomic claim: Claim if not sent and status is not 'sent'.
+  // Re-claim if status was 'sending' but last updated > 60 seconds ago (recovering from crashes or timeouts).
+  const staleThreshold = new Date(Date.now() - 60 * 1000);
   const claimed = await Booking.findOneAndUpdate(
     {
       bookingId,
       paymentStatus: 'Completed',
       confirmationEmailSent: false,
-      confirmationEmailStatus: { $nin: ['sending', 'sent'] }
+      $or: [
+        { confirmationEmailStatus: { $in: ['not_sent', 'pending', 'failed'] } },
+        { confirmationEmailStatus: 'sending', updatedAt: { $lt: staleThreshold } },
+        { confirmationEmailStatus: { $exists: false } }
+      ]
     },
-    { $set: { confirmationEmailStatus: 'sending' } },
+    {
+      $set: {
+        confirmationEmailStatus: 'sending',
+        updatedAt: new Date()
+      }
+    },
     { new: true }
   );
 
   if (!claimed) {
     const fresh = await Booking.findOne({ bookingId });
     if (fresh && (fresh.confirmationEmailSent || fresh.confirmationEmailStatus === 'sent')) {
-      return { success: true, alreadySent: true, messageId: fresh.confirmationEmailMessageId };
+      return { success: true, alreadySent: true, status: 'sent', messageId: fresh.confirmationEmailMessageId };
     }
     return { success: false, skipped: true, reason: 'Email dispatch already in progress' };
   }
 
-  // Populate metadata
-  let customerName = claimed.customerName || '';
-  if (!customerName && claimed.userEmail) {
-    const user = await User.findOne({ email: claimed.userEmail }).select('username');
-    if (user && user.username) customerName = user.username;
-  }
-
-  let posterUrl = claimed.posterUrl || '';
-  if (!posterUrl && claimed.movieId) {
-    const movie = await Movie.findById(claimed.movieId).select('posterUrl');
-    if (movie && movie.posterUrl) posterUrl = movie.posterUrl;
-  }
-
-  let theatreLocation = '';
-  if (claimed.showId) {
-    const show = await Show.findOne({ showId: claimed.showId });
-    if (show && show.theatreId) {
-      const theatre = await Theatre.findOne({ theatreId: show.theatreId }).select('location');
-      if (theatre && theatre.location) theatreLocation = theatre.location;
-    }
-  }
-
-  const details = {
-    bookingId: claimed.bookingId,
-    movieTitle: claimed.movieName,
-    theatreName: claimed.theatreName,
-    theatreLocation,
-    screen: claimed.screen || 'Screen 1',
-    showDate: claimed.showDate,
-    showTime: claimed.showTime,
-    selectedSeats: claimed.selectedSeats || [],
-    totalAmount: claimed.totalAmount,
-    paymentId: claimed.razorpayPaymentId || 'N/A',
-    paymentStatus: 'Confirmed',
-    posterUrl,
-    customerName,
-    ticketsData: claimed.ticketsData
-  };
-
-  const result = await _sendDirectBookingConfirmation(claimed.userEmail, details);
-
-  if (result.success) {
-    await Booking.findOneAndUpdate(
-      { bookingId },
-      {
-        $set: {
-          confirmationEmailSent: true,
-          confirmationEmailStatus: 'sent',
-          confirmationEmailSentAt: new Date(),
-          confirmationEmailMessageId: result.messageId,
-          confirmationEmailError: ''
-        }
+  try {
+    // Populate metadata safely
+    let customerName = claimed.customerName || '';
+    if (!customerName && claimed.userEmail) {
+      try {
+        const user = await User.findOne({ email: claimed.userEmail.toLowerCase().trim() }).select('username');
+        if (user && user.username) customerName = user.username;
+      } catch (userErr) {
+        console.warn(`[emailService] Could not lookup user for ${claimed.userEmail}:`, userErr.message);
       }
-    );
-  } else {
+    }
+
+    let posterUrl = claimed.posterUrl || '';
+    if (!posterUrl && claimed.movieId) {
+      try {
+        let movie = null;
+        if (mongoose.Types.ObjectId.isValid(claimed.movieId)) {
+          movie = await Movie.findById(claimed.movieId).select('posterUrl');
+        }
+        if (!movie) {
+          movie = await Movie.findOne({
+            $or: [
+              { movieId: claimed.movieId },
+              { tmdbId: claimed.movieId }
+            ]
+          }).select('posterUrl');
+        }
+        if (movie && movie.posterUrl) posterUrl = movie.posterUrl;
+      } catch (movieErr) {
+        console.warn(`[emailService] Could not lookup movie poster for ${claimed.movieId}:`, movieErr.message);
+      }
+    }
+
+    let theatreLocation = '';
+    if (claimed.showId) {
+      try {
+        const show = await Show.findOne({ showId: claimed.showId });
+        if (show && show.theatreId) {
+          const theatre = await Theatre.findOne({ theatreId: show.theatreId }).select('location');
+          if (theatre && theatre.location) theatreLocation = theatre.location;
+        }
+      } catch (theatreErr) {
+        console.warn(`[emailService] Could not lookup theatre for show ${claimed.showId}:`, theatreErr.message);
+      }
+    }
+
+    const details = {
+      bookingId: claimed.bookingId,
+      movieTitle: claimed.movieName,
+      theatreName: claimed.theatreName,
+      theatreLocation,
+      screen: claimed.screen || 'Screen 1',
+      showDate: claimed.showDate,
+      showTime: claimed.showTime,
+      selectedSeats: claimed.selectedSeats || [],
+      totalAmount: claimed.totalAmount,
+      paymentId: claimed.razorpayPaymentId || 'N/A',
+      paymentStatus: 'Confirmed',
+      posterUrl,
+      customerName,
+      ticketsData: claimed.ticketsData
+    };
+
+    const result = await _sendDirectBookingConfirmation(claimed.userEmail, details);
+
+    if (result.success) {
+      await Booking.findOneAndUpdate(
+        { bookingId },
+        {
+          $set: {
+            confirmationEmailSent: true,
+            confirmationEmailStatus: 'sent',
+            confirmationEmailSentAt: new Date(),
+            confirmationEmailMessageId: result.messageId || '',
+            confirmationEmailError: ''
+          }
+        }
+      );
+    } else {
+      await Booking.findOneAndUpdate(
+        { bookingId },
+        {
+          $set: {
+            confirmationEmailSent: false,
+            confirmationEmailStatus: 'failed',
+            confirmationEmailError: result.error || 'Brevo dispatch error'
+          }
+        }
+      );
+    }
+
+    return result;
+  } catch (procErr) {
+    console.error(`[emailService] Fatal error processing booking confirmation for ${bookingId}:`, procErr);
     await Booking.findOneAndUpdate(
       { bookingId },
       {
         $set: {
           confirmationEmailSent: false,
           confirmationEmailStatus: 'failed',
-          confirmationEmailError: result.error || 'Brevo dispatch error'
+          confirmationEmailError: procErr.message || 'Processing error'
         }
       }
     );
+    return { success: false, error: procErr.message };
   }
-
-  return result;
 };
 
 /**
@@ -851,7 +912,7 @@ View your bookings: ${CLIENT_URL}/bookings
  */
 const sendTicketEmail = async (userEmail, ticketDetails = {}) => {
   if (ticketDetails && ticketDetails.bookingId) {
-    return await sendBookingConfirmationEmail(ticketDetails.bookingId, ticketDetails);
+    return await sendBookingConfirmationEmail(ticketDetails.bookingId);
   }
   return await sendBookingConfirmationEmail(userEmail, ticketDetails);
 };
