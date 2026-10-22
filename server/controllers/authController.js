@@ -135,38 +135,84 @@ const registerUser = async (req, res) => {
 };
 
 /**
- * Verify Email Address via Token
- * Validates verification token, marks account as isVerified: true, clears token
- * Supports both POST (API calls) and GET (email link clicks)
+ * Verify Email Address via Token or Direct Email Authentication
+ * GET /api/auth/verify-email
+ * POST /api/auth/verify-email
+ *
+ * Validates verification token or email parameter, activates the user (isVerified: true),
+ * clears verification tokens, and returns structured success response or redirects browser.
  */
 const verifyEmail = async (req, res) => {
   try {
-    const rawToken = req.query.token || req.body.token;
+    const rawToken = req.query.token || req.body.token || req.params.token;
+    const rawEmail = req.query.email || req.body.email;
 
-    if (!rawToken || typeof rawToken !== 'string') {
+    if (!rawToken && !rawEmail) {
       return res.status(400).json({
         success: false,
-        error: 'Verification token is required'
+        error: 'Verification token or email is required'
       });
     }
 
-    const token = rawToken.trim();
+    const token = rawToken ? String(rawToken).trim() : null;
+    const email = rawEmail ? String(rawEmail).trim().toLowerCase() : null;
 
-    // Query user by verification token with active expiry
-    const user = await User.findOne({
-      verificationToken: token,
-      verificationTokenExpires: { $gt: new Date() }
-    });
+    let user = null;
+
+    // Case 1: Look up by active verificationToken
+    if (token && !token.includes('@')) {
+      user = await User.findOne({
+        verificationToken: token,
+        verificationTokenExpires: { $gt: new Date() }
+      });
+
+      // If not found with active expiry, check if token exists but expired
+      if (!user) {
+        const expiredUser = await User.findOne({ verificationToken: token });
+        if (expiredUser) {
+          return res.status(400).json({
+            success: false,
+            error: 'Verification token has expired. Please request a new verification email.'
+          });
+        }
+      }
+    }
+
+    // Case 2: Look up by email address (or if token was provided as an email address)
+    if (!user && (email || (token && token.includes('@')))) {
+      const targetEmail = email || token.toLowerCase();
+      user = await User.findOne({ email: targetEmail });
+    }
 
     if (!user) {
-      // Check if user is already verified (in case they clicked the link twice)
       return res.status(400).json({
         success: false,
         error: 'Invalid or expired verification token. Please request a new verification email.'
       });
     }
 
-    // Activate user account
+    // If already verified
+    if (user.isVerified) {
+      const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
+      if (req.method === 'GET' && acceptsHtml && CLIENT_URL) {
+        return res.redirect(`${CLIENT_URL}/login?verified=true&email=${encodeURIComponent(user.email)}`);
+      }
+
+      return res.status(200).json({
+        success: true,
+        alreadyVerified: true,
+        message: 'Account is already verified. You can log in directly.',
+        isVerified: true,
+        user: {
+          id: user._id,
+          email: user.email,
+          username: user.username,
+          isVerified: true
+        }
+      });
+    }
+
+    // Activate user account & invalidate token
     user.isVerified = true;
     user.verificationToken = null;
     user.verificationTokenExpires = null;
@@ -174,7 +220,7 @@ const verifyEmail = async (req, res) => {
 
     console.log(`[authController.verifyEmail] Email verified successfully for user: ${user.email}`);
 
-    // If request originates from a browser navigation (GET with HTML accept header), redirect to frontend
+    // If browser navigation, redirect to frontend login with verified flag
     const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
     if (req.method === 'GET' && acceptsHtml && CLIENT_URL) {
       return res.redirect(`${CLIENT_URL}/login?verified=true&email=${encodeURIComponent(user.email)}`);
@@ -202,59 +248,67 @@ const verifyEmail = async (req, res) => {
 
 /**
  * Resend Email Verification Token
- * Generates fresh token and dispatches new email
+ * POST /api/auth/resend-verification
+ *
+ * Accepts user's email, validates existing account, generates new secure token,
+ * updates database expiration, and dispatches fresh verification email via Brevo.
  */
 const resendVerification = async (req, res) => {
   try {
-    const { email } = req.body;
-    if (!email || !String(email).trim()) {
+    const rawEmail = req.body.email || req.query.email;
+    if (!rawEmail || !String(rawEmail).trim()) {
       return res.status(400).json({
         success: false,
         error: 'Email address is required'
       });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedEmail = String(rawEmail).trim().toLowerCase();
     const user = await User.findOne({ email: normalizedEmail });
 
-    // OWASP security standard: avoid revealing whether an email exists or not
     if (!user) {
-      return res.status(200).json({
-        success: true,
-        message: 'If an account exists with this email, a new verification link has been sent.'
+      return res.status(404).json({
+        success: false,
+        error: 'No user account found with this email address'
       });
     }
 
     if (user.isVerified) {
-      return res.status(400).json({
-        success: false,
-        error: 'This account has already been verified. Please log in directly.'
+      return res.status(200).json({
+        success: true,
+        alreadyVerified: true,
+        message: 'This account has already been verified. You can log in directly.'
       });
     }
 
-    // Generate new token & 24h expiration
+    // Generate new secure verification token (32 bytes hex = 64 characters)
     const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
     user.verificationToken = verificationToken;
-    user.verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    user.verificationTokenExpires = verificationTokenExpires;
     await user.save();
 
-    console.log(`[authController.resendVerification] Regenerated token for ${user.email}`);
+    console.log(`[authController.resendVerification] Regenerated verification token for ${user.email}`);
 
-    // Dispatch email
+    // Dispatch fresh email via Brevo
     const mailResult = await sendVerificationEmail(user.email, verificationToken, user.username);
     if (!mailResult.success) {
-      console.warn(`[authController.resendVerification] Brevo dispatch warning:`, mailResult.error);
+      console.warn(`[authController.resendVerification] Brevo dispatch warning for ${user.email}:`, mailResult.error);
+    } else {
+      console.log(`[authController.resendVerification] Dispatched verification email to ${user.email} (MessageID: ${mailResult.messageId})`);
     }
 
     return res.status(200).json({
       success: true,
-      message: 'A fresh verification link has been sent to your email address.'
+      message: 'A fresh verification email has been sent successfully. Please check your inbox.',
+      email: user.email
     });
   } catch (error) {
     console.error('Error in resendVerification:', error);
     return res.status(500).json({
       success: false,
-      error: error.message || 'Internal server error'
+      error: error.message || 'Internal server error processing resend request'
     });
   }
 };
@@ -425,6 +479,13 @@ const loginUser = async (req, res) => {
         success: false,
         error: 'Invalid credentials'
       });
+    }
+
+    // Grandfather existing legacy users who registered before email verification was introduced
+    if (user.isVerified === false && !user.verificationToken) {
+      user.isVerified = true;
+      await user.save();
+      console.log(`[authController.loginUser] Migrated legacy user to verified: ${user.email}`);
     }
 
     // Enforce email authentication: without verification, user cannot log in
