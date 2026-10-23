@@ -88,6 +88,10 @@ const sendEmail = async ({
       name: emailConfig.SENDER_NAME,
       email: emailConfig.SENDER_EMAIL
     },
+    replyTo: {
+      name: emailConfig.SENDER_NAME,
+      email: emailConfig.SENDER_EMAIL
+    },
     to: recipients,
     subject: subject || 'Notification from iMovies'
   };

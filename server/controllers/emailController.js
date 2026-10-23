@@ -18,7 +18,7 @@ const emailConfig = require('../config/emailConfig');
  */
 const testEmail = async (req, res) => {
   try {
-    const { to } = req.body;
+    const to = (req.body && req.body.to) || (req.query && req.query.to);
     const recipient = to || emailConfig.SENDER_EMAIL;
 
     console.log(`[emailController] Triggering test email to ${recipient}...`);

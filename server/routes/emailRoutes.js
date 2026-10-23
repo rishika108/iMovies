@@ -12,6 +12,7 @@ const {
 } = require('../controllers/emailController');
 
 // Test & diagnostics
+router.get('/test', testEmail);
 router.post('/test', testEmail);
 
 // Explicit transactional triggers
