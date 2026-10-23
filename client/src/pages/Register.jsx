@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import API from '../utils/api';
@@ -10,11 +10,16 @@ import {
   faEye,
   faEyeSlash,
   faCheckCircle,
-  faPaperPlane,
-  faArrowRight
+  faShieldHalved,
+  faRotateRight,
+  faArrowLeft
 } from '@fortawesome/free-solid-svg-icons';
 
 export default function Register() {
+  // Step state: 'form' | 'otp'
+  const [step, setStep] = useState('form');
+
+  // Form fields
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -22,21 +27,40 @@ export default function Register() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // Verification state (Trigger 1)
-  const [registeredSuccess, setRegisteredSuccess] = useState(false);
+  // OTP state
+  const [otp, setOtp] = useState('');
   const [registeredEmail, setRegisteredEmail] = useState('');
-  const [resending, setResending] = useState(false);
+  const [otpLoading, setOtpLoading] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(30);
+  const [canResend, setCanResend] = useState(false);
 
   const navigate = useNavigate();
+
+  // Handle Resend OTP countdown
+  useEffect(() => {
+    let timer;
+    if (step === 'otp' && resendCountdown > 0) {
+      timer = setInterval(() => {
+        setResendCountdown((prev) => {
+          if (prev <= 1) {
+            setCanResend(true);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [step, resendCountdown]);
 
   const validateEmail = (val) => {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
   };
 
-  const handleSubmit = async (e) => {
+  // Step 1: Submit Registration Form
+  const handleRegisterSubmit = async (e) => {
     e.preventDefault();
 
-    // Validations
     if (!username.trim() || !email.trim() || !password || !confirmPassword) {
       toast.error('All fields are required');
       return;
@@ -65,7 +89,6 @@ export default function Register() {
     setLoading(true);
 
     try {
-      // Public registrations strictly target /auth/register
       const response = await API.post('/auth/register', {
         username: username.trim(),
         email: email.trim().toLowerCase(),
@@ -73,9 +96,14 @@ export default function Register() {
       });
 
       if (response.data && response.data.success) {
-        setRegisteredSuccess(true);
         setRegisteredEmail(email.trim().toLowerCase());
-        toast.success('🎉 Account registered! Verification email sent.');
+        setStep('otp');
+        setResendCountdown(30);
+        setCanResend(false);
+        toast.info(
+          response.data.message ||
+            'Verification code sent! Please check your email inbox to activate your account.'
+        );
       } else {
         toast.error(response.data?.error || response.data?.message || 'Registration failed');
       }
@@ -83,23 +111,70 @@ export default function Register() {
       const errorMessage =
         err.response?.data?.error ||
         err.response?.data?.message ||
-        'Registration failed. Please try again.';
+        'Registration failed. Please check your details and try again.';
       toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleResend = async () => {
-    if (!registeredEmail) return;
-    setResending(true);
+  // Step 2: Submit 6-digit OTP to verify account
+  const handleVerifyOtp = async (e) => {
+    e.preventDefault();
+
+    const cleanOtp = otp.trim();
+    if (!cleanOtp || cleanOtp.length !== 6) {
+      toast.error('Please enter the 6-digit verification code');
+      return;
+    }
+
+    setOtpLoading(true);
+
     try {
-      await API.post('/auth/resend-verification', { email: registeredEmail });
-      toast.success('✉️ A new verification link has been sent to your email.');
+      const response = await API.post('/auth/verify-otp', {
+        email: registeredEmail,
+        otp: cleanOtp
+      });
+
+      if (response.data && response.data.success) {
+        toast.success(response.data.message || '🎉 Account verified successfully! Welcome to iMovies.');
+        if (response.data.token) {
+          localStorage.setItem('imovies-user-token', response.data.token);
+          localStorage.setItem(
+            'imovies-user',
+            JSON.stringify(response.data.user || { email: registeredEmail, username, role: 'user' })
+          );
+          navigate('/home');
+        } else {
+          navigate('/login');
+        }
+      } else {
+        toast.error(response.data?.error || 'Invalid verification code');
+      }
     } catch (err) {
-      toast.info('✉️ If an account exists, a verification link has been dispatched.');
+      const errorMessage =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        'Verification failed. Please check the code and try again.';
+      toast.error(errorMessage);
     } finally {
-      setResending(false);
+      setOtpLoading(false);
+    }
+  };
+
+  // Resend OTP handler
+  const handleResendOtp = async () => {
+    if (!canResend) return;
+
+    try {
+      setCanResend(false);
+      setResendCountdown(30);
+      const res = await API.post('/auth/resend-otp', { email: registeredEmail });
+      toast.success(res.data?.message || 'A fresh verification OTP has been sent to your email.');
+    } catch (err) {
+      setCanResend(true);
+      const errorMessage = err.response?.data?.error || 'Failed to resend code. Please try again.';
+      toast.error(errorMessage);
     }
   };
 
@@ -123,53 +198,16 @@ export default function Register() {
         </div>
 
         {/* Auth Card */}
-        <div className="dark-card p-4 p-sm-5 shadow-lg position-relative" style={{ border: '1px solid #282f44', borderRadius: '14px' }}>
-          {registeredSuccess ? (
-            <div className="text-center py-3">
-              <div
-                className="d-inline-flex align-items-center justify-content-center rounded-circle mb-3"
-                style={{ width: '72px', height: '72px', backgroundColor: 'rgba(229, 9, 20, 0.15)', color: 'var(--primary-red)' }}
-              >
-                <FontAwesomeIcon icon={faPaperPlane} size="2x" />
-              </div>
-              <h4 className="text-white fw-bold mb-2">Verify Your Email</h4>
-              <p className="text-secondary small mb-3">
-                We have dispatched a verification email to:
-                <br />
-                <strong className="text-white fs-6">{registeredEmail}</strong>
-              </p>
-              <div
-                className="alert alert-dark text-start py-2 px-3 mb-4 small border-0"
-                style={{ backgroundColor: '#131926', color: '#94a3b8', borderRadius: '8px' }}
-              >
-                🔒 <strong>Authentication Required:</strong> You cannot sign in until you authenticate your email by clicking the link in your inbox.
-              </div>
-              <div className="d-flex flex-column gap-2">
-                <button
-                  className="btn btn-primary-red w-100 py-2 fw-bold d-flex align-items-center justify-content-center gap-2"
-                  onClick={() => navigate('/login')}
-                >
-                  Proceed to Sign In <FontAwesomeIcon icon={faArrowRight} />
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-outline-secondary w-100 btn-sm py-2"
-                  onClick={handleResend}
-                  disabled={resending}
-                >
-                  {resending ? 'Sending...' : 'Resend Verification Email'}
-                </button>
-              </div>
-            </div>
-          ) : (
+        <div className="dark-card p-4 p-sm-5 shadow-lg position-relative" style={{ border: '1px solid #282f44' }}>
+          {step === 'form' ? (
             <>
               <h4 className="text-white fw-bold mb-2 text-center">Create Your Account</h4>
               <p className="text-secondary small text-center mb-4">
                 Get instant access to live TMDB releases, seat reservations & trailers
               </p>
 
-              {/* Form */}
-              <form onSubmit={handleSubmit}>
+              {/* Registration Form */}
+              <form onSubmit={handleRegisterSubmit}>
                 {/* Username */}
                 <div className="mb-3">
                   <label className="form-label small text-secondary fw-semibold">Username (3-20 chars)</label>
@@ -218,7 +256,7 @@ export default function Register() {
                     <input
                       type={showPassword ? 'text' : 'password'}
                       className="form-control form-dark"
-                      placeholder="Create a strong password"
+                      placeholder="Enter a strong password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       minLength={6}
@@ -241,12 +279,12 @@ export default function Register() {
                   <label className="form-label small text-secondary fw-semibold">Confirm Password</label>
                   <div className="input-group">
                     <span className="input-group-text bg-dark border-secondary text-secondary" style={{ borderColor: '#333b50' }}>
-                      <FontAwesomeIcon icon={faCheckCircle} />
+                      <FontAwesomeIcon icon={faLock} />
                     </span>
                     <input
                       type={showPassword ? 'text' : 'password'}
                       className="form-control form-dark"
-                      placeholder="Re-type your password"
+                      placeholder="Re-enter your password"
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       minLength={6}
@@ -255,10 +293,21 @@ export default function Register() {
                   </div>
                 </div>
 
+                {/* Notice regarding mandatory email OTP verification */}
+                <div
+                  className="p-3 mb-4 rounded-3 d-flex align-items-start gap-2"
+                  style={{ background: 'rgba(2, 132, 199, 0.1)', border: '1px solid rgba(2, 132, 199, 0.25)' }}
+                >
+                  <FontAwesomeIcon icon={faShieldHalved} className="text-info mt-1" />
+                  <span className="text-secondary small" style={{ fontSize: '0.8rem' }}>
+                    A 6-digit OTP code and confirmation link will be delivered to your email to verify your identity.
+                  </span>
+                </div>
+
                 {/* Submit Button */}
                 <button
                   type="submit"
-                  className="btn btn-primary-red w-100 py-2 fw-bold text-white rounded-3 border-0 transition-all"
+                  className="btn-primary-red w-100 py-2 fw-bold text-white rounded-3 border-0 transition-all"
                   disabled={loading}
                 >
                   {loading ? (
@@ -267,12 +316,12 @@ export default function Register() {
                       Creating Account...
                     </span>
                   ) : (
-                    'Create User Account'
+                    'Create Account'
                   )}
                 </button>
               </form>
 
-              {/* Bottom link */}
+              {/* Bottom link to Login */}
               <div className="text-center mt-4 pt-2 border-top border-dark">
                 <p className="text-secondary small mb-0">
                   Already have an account?{' '}
@@ -282,6 +331,95 @@ export default function Register() {
                 </p>
               </div>
             </>
+          ) : (
+            /* Step 2: 6-Digit OTP Verification Screen */
+            <div className="text-center">
+              <div
+                className="d-inline-flex align-items-center justify-content-center rounded-circle mb-3"
+                style={{ width: '64px', height: '64px', background: 'rgba(229, 9, 20, 0.15)', border: '1px solid var(--primary-red)' }}
+              >
+                <FontAwesomeIcon icon={faShieldHalved} style={{ fontSize: '28px', color: 'var(--primary-red)' }} />
+              </div>
+
+              <h4 className="text-white fw-bold mb-2">Verify Your Email</h4>
+              <p className="text-secondary small mb-1">
+                We sent a 6-digit verification code to
+              </p>
+              <div className="badge bg-dark border border-secondary text-info fw-semibold px-3 py-2 mb-3" style={{ fontSize: '0.9rem' }}>
+                {registeredEmail}
+              </div>
+
+              <form onSubmit={handleVerifyOtp} className="mt-3">
+                <div className="mb-4">
+                  <label className="form-label small text-secondary fw-semibold mb-2">
+                    Enter 6-Digit Code
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                    placeholder="• • • • • •"
+                    className="form-control text-center text-white fw-bold"
+                    style={{
+                      fontSize: '1.8rem',
+                      letterSpacing: '10px',
+                      background: '#0d111b',
+                      border: '2px solid #333b50',
+                      borderRadius: '10px',
+                      padding: '12px 16px'
+                    }}
+                    autoFocus
+                    required
+                  />
+                  <div className="text-secondary small mt-2">
+                    ⏱ Code expires in 15 minutes
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="btn-primary-red w-100 py-2 fw-bold text-white rounded-3 border-0 transition-all mb-3"
+                  disabled={otpLoading || otp.length !== 6}
+                >
+                  {otpLoading ? (
+                    <span className="d-flex align-items-center justify-content-center gap-2">
+                      <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                      Verifying Code...
+                    </span>
+                  ) : (
+                    'Verify & Activate Account'
+                  )}
+                </button>
+              </form>
+
+              {/* Resend Option */}
+              <div className="d-flex align-items-center justify-content-between pt-3 border-top border-dark">
+                <button
+                  type="button"
+                  className="btn btn-link text-secondary text-decoration-none p-0 small d-flex align-items-center gap-1"
+                  onClick={() => {
+                    setStep('form');
+                    setOtp('');
+                  }}
+                >
+                  <FontAwesomeIcon icon={faArrowLeft} /> Back
+                </button>
+
+                <button
+                  type="button"
+                  className="btn btn-link text-decoration-none p-0 small fw-semibold"
+                  style={{ color: canResend ? 'var(--primary-red)' : '#64748b' }}
+                  onClick={handleResendOtp}
+                  disabled={!canResend}
+                >
+                  <FontAwesomeIcon icon={faRotateRight} className="me-1" />
+                  {canResend ? 'Resend Code' : `Resend in ${resendCountdown}s`}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>

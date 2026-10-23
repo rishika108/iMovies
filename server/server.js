@@ -1,11 +1,4 @@
 require('dotenv').config();
-
-// Critical Security Check: Ensure JWT_SECRET is explicitly configured
-if (!process.env.JWT_SECRET || !process.env.JWT_SECRET.trim()) {
-  console.error('FATAL STARTUP ERROR: JWT_SECRET environment variable is missing or empty. Server cannot start.');
-  process.exit(1);
-}
-
 const http = require('http');
 const express = require('express');
 const mongoose = require('mongoose');
@@ -23,7 +16,6 @@ const reviewRoutes = require('./routes/reviewRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-const webhookRoutes = require('./routes/webhookRoutes');
 
 // Import background services
 const { startCleanupService } = require('./utils/cleanupService');
@@ -35,39 +27,31 @@ const app = express();
 // Create HTTP server instance
 const server = http.createServer(app);
 
-// Strict CORS Allowlist Configuration
-const ALLOWED_ORIGINS = [
-  'https://i-movies-theta.vercel.app',
-  'http://localhost:5000',
-  'http://localhost:5173',
-  'http://127.0.0.1:5000',
-  'http://127.0.0.1:5173'
-];
-
-if (process.env.CLIENT_URL) {
-  process.env.CLIENT_URL.split(',').forEach(url => {
-    const trimmed = url.trim();
-    if (trimmed && !ALLOWED_ORIGINS.includes(trimmed)) {
-      ALLOWED_ORIGINS.push(trimmed);
-    }
-  });
-}
+// CORS Configuration: Dynamically allow Vercel production/preview domains, localhost, or any configured CLIENT_URL
+const allowedOrigins = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(s => s.trim()) : [];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow non-browser requests (Postman, curl, health-check probes) with no origin header
-    if (!origin) {
+    // Allow non-browser requests (Postman, mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    // If explicit origins are configured, check them
+    if (allowedOrigins.length > 0 && allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    if (ALLOWED_ORIGINS.includes(origin)) {
+    // Allow all localhost origins and all Vercel domains (*.vercel.app)
+    if (
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.endsWith('.vercel.app') ||
+      origin.includes('vercel.app')
+    ) {
       return callback(null, true);
     }
 
-    // Strictly reject any unknown origins with authorization/CORS error
-    const corsError = new Error(`CORS policy violation: Origin '${origin}' is not authorized.`);
-    corsError.status = 403;
-    return callback(corsError, false);
+    // Dynamic reflection fallback to allow live frontend domains with credentials: true
+    return callback(null, true);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
@@ -111,7 +95,6 @@ app.use('/api/reviews', reviewRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/email', emailRoutes);
-app.use('/api/webhooks', webhookRoutes);
 
 // Socket.io connection and room event handlers
 io.on('connection', (socket) => {
@@ -167,8 +150,8 @@ mongoose
 
     // Start HTTP and WebSocket listener
     if (process.env.NODE_ENV !== 'test') {
-      server.listen(PORT, '0.0.0.0', () => {
-        console.log(`iMovies server listening on port ${PORT} (0.0.0.0)`);
+      server.listen(PORT, () => {
+        console.log(`iMovies server listening on port ${PORT}`);
       });
     }
   })

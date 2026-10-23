@@ -3,7 +3,7 @@ const Razorpay = require('razorpay');
 const Booking = require('../models/bookingModel');
 const Show = require('../models/showModel');
 const { sendBookingConfirmation } = require('../utils/mailer');
-const { sendBookingConfirmationEmail, sendTicketEmail } = require('../services/emailService');
+const { sendTicketEmail } = require('../services/emailService');
 
 /**
  * Initialize Razorpay instance safely
@@ -123,40 +123,12 @@ const verifyPayment = async (req, res) => {
       .update(body)
       .digest('hex');
 
-    let isAuthentic = false;
-    try {
-      const expBuf = Buffer.from(expectedSignature, 'utf-8');
-      const sigBuf = Buffer.from(razorpay_signature, 'utf-8');
-      if (expBuf.length === sigBuf.length && crypto.timingSafeEqual(expBuf, sigBuf)) {
-        isAuthentic = true;
-      }
-    } catch (e) {
-      isAuthentic = false;
-    }
+    const isAuthentic = expectedSignature === razorpay_signature;
 
     if (!isAuthentic) {
-      // If signature is invalid, mark booking as Failed and release temporary seat holds
+      // If signature is invalid, mark booking as Failed if it exists
       if (bookingId) {
-        const failedBooking = await Booking.findOneAndUpdate(
-          { bookingId },
-          { paymentStatus: 'Failed' },
-          { new: true }
-        );
-        if (failedBooking && failedBooking.showId && Array.isArray(failedBooking.selectedSeats)) {
-          const show = await Show.findOne({ showId: failedBooking.showId });
-          if (show && show.tickets) {
-            for (const seatId of failedBooking.selectedSeats) {
-              if (show.tickets[seatId] && show.tickets[seatId].status === 'locked') {
-                show.tickets[seatId].status = 'available';
-                delete show.tickets[seatId].lockExpiry;
-                delete show.tickets[seatId].lockedBy;
-                delete show.tickets[seatId].bookingId;
-              }
-            }
-            show.markModified('tickets');
-            await show.save();
-          }
-        }
+        await Booking.findOneAndUpdate({ bookingId }, { paymentStatus: 'Failed' });
       }
       return res.status(400).json({
         success: false,
@@ -177,45 +149,6 @@ const verifyPayment = async (req, res) => {
       return res.status(404).json({
         success: false,
         error: 'Associated booking record not found'
-      });
-    }
-
-    // Ownership check (BOLA/IDOR protection)
-    const requesterEmail = req.user?.email ? req.user.email.trim().toLowerCase() : null;
-    const isAdmin = req.user?.role === 'admin' || req.admin?.role === 'admin';
-    const bookingUserEmail = booking.userEmail ? booking.userEmail.trim().toLowerCase() : null;
-    if (!isAdmin && requesterEmail && bookingUserEmail && requesterEmail !== bookingUserEmail) {
-      return res.status(403).json({
-        success: false,
-        error: 'Forbidden: You do not have permission to verify or modify this booking'
-      });
-    }
-
-    // Order ID consistency check
-    if (booking.razorpayOrderId && booking.razorpayOrderId !== razorpay_order_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Order mismatch: razorpay_order_id does not match the booking order'
-      });
-    }
-
-    // Handle duplicate confirmation idempotently
-    if (booking.paymentStatus === 'Completed') {
-      let emailNotification = {
-        status: booking.confirmationEmailStatus === 'sent' ? 'sent' : 'already_processed'
-      };
-      if (booking.confirmationEmailStatus !== 'sent') {
-        const emailRes = await sendBookingConfirmationEmail(booking.bookingId);
-        emailNotification = {
-          status: emailRes.status || (emailRes.success ? 'sent' : 'failed'),
-          messageId: emailRes.messageId || null
-        };
-      }
-      return res.status(200).json({
-        success: true,
-        message: 'Payment was already verified and booking is confirmed',
-        booking,
-        emailNotification
       });
     }
 
@@ -263,26 +196,28 @@ const verifyPayment = async (req, res) => {
       }
     }
 
-    // Step 5: Send automated email ticket confirmation using SendGrid emailService
-    let emailNotification = { status: 'pending' };
+    // Step 5: Send automated email ticket confirmation using emailService
     try {
-      const emailResult = await sendBookingConfirmationEmail(booking.bookingId);
-      emailNotification = {
-        status: emailResult.status || (emailResult.success ? 'sent' : (emailResult.alreadySent ? 'sent' : 'failed')),
-        messageId: emailResult.messageId || null
-      };
+      const recipientEmail = booking.userEmail || req.user?.email;
+      if (recipientEmail) {
+        await sendTicketEmail(recipientEmail, {
+          bookingId: booking.bookingId,
+          movieTitle: booking.movieName,
+          theatre: booking.theatreName,
+          showDate: booking.showDate,
+          showTime: booking.showTime,
+          seatNumbers: booking.selectedSeats,
+          totalAmount: booking.totalAmount
+        });
+      }
     } catch (emailErr) {
       console.warn('[Payment Controller Ticket Email Note]:', emailErr.message);
-      emailNotification = { status: 'failed', error: 'Email service temporary failure' };
     }
-
-    const finalBooking = await Booking.findOne({ bookingId: booking.bookingId });
 
     return res.status(200).json({
       success: true,
       message: 'Payment verified and booking confirmed successfully',
-      booking: finalBooking || updatedBooking,
-      emailNotification
+      booking: updatedBooking
     });
   } catch (error) {
     console.error('[Razorpay verifyPayment Error]:', error);

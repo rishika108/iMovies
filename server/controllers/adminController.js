@@ -98,6 +98,7 @@ const deleteUser = async (req, res) => {
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const Razorpay = require('razorpay');
+const { sendBookingStatusUpdateEmail } = require('../services/emailService');
 
 const getRazorpayInstance = () => {
   const key_id = process.env.RAZORPAY_KEY_ID;
@@ -250,6 +251,18 @@ const refundBooking = async (req, res) => {
           });
         }
       }
+    }
+
+    // Dispatch refund notification email asynchronously via Brevo
+    if (booking.userEmail) {
+      sendBookingStatusUpdateEmail(booking.userEmail, {
+        bookingId: booking.bookingId,
+        movieName: booking.movieName,
+        status: 'Refunded',
+        refundAmount,
+        reason,
+        releasedSeats: booking.selectedSeats
+      }).catch((e) => console.warn('[adminController] Refund status email note:', e.message));
     }
 
     return res.status(200).json({

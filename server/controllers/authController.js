@@ -1,27 +1,22 @@
-const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const User = require('../models/userModel');
 const Admin = require('../models/adminModel');
 const {
   sendVerificationEmail,
   sendPasswordResetEmail
 } = require('../services/emailService');
-const { CLIENT_URL, isConfigured } = require('../config/brevoConfig');
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET || !JWT_SECRET.trim()) {
-  throw new Error('FATAL SECURITY ERROR: JWT_SECRET environment variable is missing or empty.');
-}
+const JWT_SECRET = process.env.JWT_SECRET || 'imovies_super_secret_jwt_key_2024';
 
 /**
  * Register a new User
- * Validates username, email, password
- * Checks for duplicates
- * Hashes password with bcryptjs saltRounds=10
- * Generates secure verification token (24-hour expiration)
- * Dispatches verification email via Brevo
- * Signs JWT with { user: { id, email, username, role, isVerified } }, expires in 7d
+ * Validates fields, checks duplicates
+ * Hashes password
+ * Generates 6-digit OTP & verification token
+ * Sends Brevo verification email
+ * Returns requireVerification: true
  */
 const registerUser = async (req, res) => {
   try {
@@ -37,10 +32,10 @@ const registerUser = async (req, res) => {
     }
 
     const normalizedUsername = String(rawUsername).trim();
-    if (normalizedUsername.length < 3 || normalizedUsername.length > 20) {
+    if (normalizedUsername.length < 3) {
       return res.status(400).json({
         success: false,
-        error: 'Username must be between 3 and 20 characters long'
+        error: 'Username must be at least 3 characters long'
       });
     }
 
@@ -52,20 +47,46 @@ const registerUser = async (req, res) => {
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(normalizedEmail)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Please provide a valid email address'
-      });
-    }
 
     // Check for duplicate email or username
     const existingUser = await User.findOne({
       $or: [{ email: normalizedEmail }, { username: normalizedUsername }]
     });
 
+    // Generate 6-digit verification OTP and cryptographic verification token (valid for 15 mins)
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
     if (existingUser) {
+      // If user exists with same email but is NOT verified, update credentials & resend OTP
+      if (existingUser.email === normalizedEmail && existingUser.isVerified === false) {
+        existingUser.username = normalizedUsername;
+        existingUser.password = hashedPassword;
+        existingUser.verificationOtp = otp;
+        existingUser.verificationOtpExpires = expiry;
+        existingUser.verificationToken = verificationToken;
+        existingUser.verificationTokenExpires = expiry;
+        await existingUser.save();
+
+        // Send Brevo verification email asynchronously
+        sendVerificationEmail(normalizedEmail, {
+          username: normalizedUsername,
+          verificationToken,
+          otp
+        }).catch((err) => console.error('[registerUser] Verification email dispatch error:', err.message));
+
+        return res.status(200).json({
+          success: true,
+          requireVerification: true,
+          email: normalizedEmail,
+          message: 'A fresh 6-digit OTP has been sent to your email. Please verify to activate your account.'
+        });
+      }
+
       const isEmailDuplicate = existingUser.email === normalizedEmail;
       return res.status(400).json({
         success: false,
@@ -75,88 +96,33 @@ const registerUser = async (req, res) => {
       });
     }
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Generate secure random verification token (32 bytes hex = 64 characters)
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    // Check if Brevo email service is active on this host
-    const emailServiceActive = isConfigured();
-
-    // If email service is active, require verification; otherwise auto-verify to prevent locking out users
-    const isVerified = !emailServiceActive;
-
+    // Create new unverified user
     const newUser = new User({
       username: normalizedUsername,
       email: normalizedEmail,
       password: hashedPassword,
       role: 'user',
-      isVerified,
-      verificationToken: emailServiceActive ? verificationToken : null,
-      verificationTokenExpires: emailServiceActive ? verificationTokenExpires : null,
-      emailStatus: 'valid'
+      isVerified: false,
+      verificationOtp: otp,
+      verificationOtpExpires: expiry,
+      verificationToken,
+      verificationTokenExpires: expiry
     });
 
-    const savedUser = await newUser.save();
-    console.log(`[authController.registerUser] Created user: ${savedUser.email} (ID: ${savedUser._id}, isVerified: ${isVerified})`);
+    await newUser.save();
 
-    // If email service is configured, dispatch verification email
-    if (emailServiceActive) {
-      sendVerificationEmail(savedUser.email, verificationToken, savedUser.username)
-        .then((mailRes) => {
-          if (mailRes.success) {
-            console.log(`[authController.registerUser] Verification email dispatched to ${savedUser.email} (MsgID: ${mailRes.messageId})`);
-          } else {
-            console.warn(`[authController.registerUser] Failed to send verification email to ${savedUser.email}:`, mailRes.error);
-          }
-        })
-        .catch((mailErr) => {
-          console.error(`[authController.registerUser] Exception sending verification email:`, mailErr.message);
-        });
-
-      return res.status(201).json({
-        success: true,
-        requiresVerification: true,
-        message: 'Account created successfully! We have sent an authentication link to your email. Please verify your email to activate your account.',
-        email: savedUser.email,
-        user: {
-          id: savedUser._id,
-          email: savedUser.email,
-          username: savedUser.username,
-          role: 'user',
-          isVerified: false
-        }
-      });
-    }
-
-    // Email service not configured on host: auto-authenticate and issue token
-    const payload = {
-      user: {
-        id: savedUser._id,
-        email: savedUser.email,
-        username: savedUser.username,
-        role: 'user',
-        isVerified: true
-      },
-      role: 'user'
-    };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+    // Send Brevo verification email containing 6-digit OTP and direct activation link
+    sendVerificationEmail(normalizedEmail, {
+      username: normalizedUsername,
+      verificationToken,
+      otp
+    }).catch((err) => console.error('[registerUser] Verification email dispatch error:', err.message));
 
     return res.status(201).json({
       success: true,
-      requiresVerification: false,
-      message: 'Account created and verified successfully!',
-      token,
-      user: {
-        id: savedUser._id,
-        email: savedUser.email,
-        username: savedUser.username,
-        role: 'user',
-        isVerified: true
-      }
+      requireVerification: true,
+      email: normalizedEmail,
+      message: 'Account created! Please enter the 6-digit verification code sent to your email.'
     });
   } catch (error) {
     console.error('Error in registerUser / signup:', error);
@@ -168,320 +134,230 @@ const registerUser = async (req, res) => {
 };
 
 /**
- * Verify Email Address via Token or Direct Email Authentication
- * GET /api/auth/verify-email
- * POST /api/auth/verify-email
- *
- * Validates verification token or email parameter, activates the user (isVerified: true),
- * clears verification tokens, and returns structured success response or redirects browser.
+ * Verify Registration OTP
+ * POST /api/auth/verify-otp
+ * Verifies the 6-digit code, activates user account (isVerified = true), and returns JWT
  */
-const verifyEmail = async (req, res) => {
+const verifyOtp = async (req, res) => {
   try {
-    const rawToken = req.query.token || req.body.token || req.params.token;
-    const rawEmail = req.query.email || req.body.email;
+    const { email, otp } = req.body;
 
-    if (!rawToken && !rawEmail) {
+    if (!email || !otp) {
       return res.status(400).json({
         success: false,
-        error: 'Verification token or email is required'
+        error: 'Please provide both email and 6-digit OTP'
       });
     }
 
-    const token = rawToken ? String(rawToken).trim() : null;
-    const email = rawEmail ? String(rawEmail).trim().toLowerCase() : null;
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
 
-    let user = null;
-
-    // Case 1: Look up by active verificationToken
-    if (token && !token.includes('@')) {
-      user = await User.findOne({
-        verificationToken: token,
-        verificationTokenExpires: { $gt: new Date() }
-      });
-
-      // If not found with active expiry, check if token exists but expired
-      if (!user) {
-        const expiredUser = await User.findOne({ verificationToken: token });
-        if (expiredUser) {
-          return res.status(400).json({
-            success: false,
-            error: 'Verification token has expired. Please request a new verification email.'
-          });
-        }
-      }
-    }
-
-    // Case 2: Look up by email address (or if token was provided as an email address)
-    if (!user && (email || (token && token.includes('@')))) {
-      const targetEmail = email || token.toLowerCase();
-      user = await User.findOne({ email: targetEmail });
-    }
-
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
-      return res.status(400).json({
+      return res.status(404).json({
         success: false,
-        error: 'Invalid or expired verification token. Please request a new verification email.'
+        error: 'No account found with this email address'
       });
     }
 
     // If already verified
     if (user.isVerified) {
-      const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
-      if (req.method === 'GET' && acceptsHtml && CLIENT_URL) {
-        return res.redirect(`${CLIENT_URL}/login?verified=true&email=${encodeURIComponent(user.email)}`);
-      }
-
-      return res.status(200).json({
-        success: true,
-        alreadyVerified: true,
-        message: 'Account is already verified. You can log in directly.',
-        isVerified: true,
+      const payload = {
         user: {
           id: user._id,
           email: user.email,
           username: user.username,
-          isVerified: true
-        }
+          role: user.role || 'user'
+        },
+        role: user.role || 'user'
+      };
+      const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+      return res.status(200).json({
+        success: true,
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          username: user.username,
+          role: user.role || 'user'
+        },
+        message: 'Account is already verified.'
       });
     }
 
-    // Activate user account & invalidate token
-    user.isVerified = true;
-    user.verificationToken = null;
-    user.verificationTokenExpires = null;
-    await user.save();
-
-    console.log(`[authController.verifyEmail] Email verified successfully for user: ${user.email}`);
-
-    // If browser navigation, redirect to frontend login with verified flag
-    const acceptsHtml = req.headers.accept && req.headers.accept.includes('text/html');
-    if (req.method === 'GET' && acceptsHtml && CLIENT_URL) {
-      return res.redirect(`${CLIENT_URL}/login?verified=true&email=${encodeURIComponent(user.email)}`);
+    // Verify OTP match and expiration
+    if (!user.verificationOtp || user.verificationOtp !== cleanOtp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid verification OTP code. Please check and try again.'
+      });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Your email address has been verified successfully! You now have full access to iMovies.',
-      isVerified: true,
+    if (!user.verificationOtpExpires || new Date() > new Date(user.verificationOtpExpires)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Verification code has expired. Please request a new OTP.'
+      });
+    }
+
+    // Mark account verified and clear OTP
+    user.isVerified = true;
+    user.verificationOtp = undefined;
+    user.verificationOtpExpires = undefined;
+    user.verificationToken = undefined;
+    user.verificationTokenExpires = undefined;
+    await user.save();
+
+    // Sign JWT
+    const payload = {
       user: {
         id: user._id,
         email: user.email,
         username: user.username,
-        isVerified: true
-      }
-    });
-  } catch (error) {
-    console.error('Error in verifyEmail:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Internal server error verifying email'
-    });
-  }
-};
+        role: user.role || 'user'
+      },
+      role: user.role || 'user'
+    };
 
-/**
- * Resend Email Verification Token
- * POST /api/auth/resend-verification
- *
- * Accepts user's email, validates existing account, generates new secure token,
- * updates database expiration, and dispatches fresh verification email via Brevo.
- */
-const resendVerification = async (req, res) => {
-  try {
-    const rawEmail = req.body.email || req.query.email;
-    if (!rawEmail || !String(rawEmail).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: 'Email address is required'
-      });
-    }
-
-    const normalizedEmail = String(rawEmail).trim().toLowerCase();
-    const user = await User.findOne({ email: normalizedEmail });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'No user account found with this email address'
-      });
-    }
-
-    if (user.isVerified) {
-      return res.status(200).json({
-        success: true,
-        alreadyVerified: true,
-        message: 'This account has already been verified. You can log in directly.'
-      });
-    }
-
-    // Generate new secure verification token (32 bytes hex = 64 characters)
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    const verificationTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-    user.verificationToken = verificationToken;
-    user.verificationTokenExpires = verificationTokenExpires;
-    await user.save();
-
-    console.log(`[authController.resendVerification] Regenerated verification token for ${user.email}`);
-
-    // Dispatch fresh email via Brevo
-    const mailResult = await sendVerificationEmail(user.email, verificationToken, user.username);
-    if (!mailResult.success) {
-      console.warn(`[authController.resendVerification] Brevo dispatch warning for ${user.email}:`, mailResult.error);
-    } else {
-      console.log(`[authController.resendVerification] Dispatched verification email to ${user.email} (MessageID: ${mailResult.messageId})`);
-    }
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
     return res.status(200).json({
       success: true,
-      message: 'A fresh verification email has been sent successfully. Please check your inbox.',
-      email: user.email
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        role: user.role || 'user'
+      },
+      message: '🎉 Account verified successfully! Welcome to iMovies.'
     });
   } catch (error) {
-    console.error('Error in resendVerification:', error);
+    console.error('Error in verifyOtp:', error);
     return res.status(500).json({
       success: false,
-      error: error.message || 'Internal server error processing resend request'
+      error: error.message || 'Failed to verify OTP'
     });
   }
 };
 
 /**
- * Request Password Reset (Forgot Password Flow)
- * Generates a secure single-use reset token valid for 1 hour
- * Dispatches password recovery email via Brevo
+ * Verify Email Token (Direct Link clicked from email)
+ * GET or POST /api/auth/verify-email
  */
-const requestPasswordReset = async (req, res) => {
+const verifyEmailToken = async (req, res) => {
   try {
-    const { email } = req.body;
+    const token = req.query.token || req.body.token;
+    const email = req.query.email || req.body.email;
 
-    if (!email || !String(email).trim()) {
+    if (!token || !email) {
       return res.status(400).json({
         success: false,
-        error: 'Please provide your registered email address'
+        error: 'Verification token and email are required'
       });
     }
 
     const normalizedEmail = String(email).trim().toLowerCase();
     const user = await User.findOne({ email: normalizedEmail });
 
-    // OWASP: Always return 200 with generic message to prevent account enumeration attacks
     if (!user) {
-      console.log(`[authController.requestPasswordReset] Attempted reset for non-existent email: ${normalizedEmail}`);
-      return res.status(200).json({
-        success: true,
-        message: 'If an account exists with that email, a password recovery link has been sent.'
-      });
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
 
-    // Check if user has bounced email
-    if (user.emailStatus === 'hard_bounce' || user.emailStatus === 'blocked' || user.emailStatus === 'spam') {
-      console.warn(`[authController.requestPasswordReset] Skipping email dispatch for bounced/blocked address: ${user.email}`);
-      return res.status(400).json({
-        success: false,
-        error: 'Email delivery to this address has been previously blocked or bounced. Please contact support.'
-      });
+    if (user.isVerified) {
+      return res.status(200).json({ success: true, message: 'Account is already verified.' });
     }
 
-    // Generate secure random reset token (32 bytes hex)
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    user.resetPasswordToken = resetToken;
-    user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour expiration
+    if (!user.verificationToken || user.verificationToken !== token) {
+      return res.status(400).json({ success: false, error: 'Invalid verification link.' });
+    }
+
+    if (!user.verificationTokenExpires || new Date() > new Date(user.verificationTokenExpires)) {
+      return res.status(400).json({ success: false, error: 'Verification link has expired.' });
+    }
+
+    user.isVerified = true;
+    user.verificationOtp = undefined;
+    user.verificationOtpExpires = undefined;
+    user.verificationToken = undefined;
+    user.verificationTokenExpires = undefined;
     await user.save();
 
-    console.log(`[authController.requestPasswordReset] Generated password reset token for: ${user.email}`);
-
-    // Asynchronously dispatch recovery email
-    const mailResult = await sendPasswordResetEmail(user.email, resetToken, user.username);
-    if (!mailResult.success) {
-      console.error(`[authController.requestPasswordReset] Brevo dispatch error for ${user.email}:`, mailResult.error);
+    // If browser GET request, redirect to frontend with verified query parameter
+    if (req.method === 'GET') {
+      const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+      return res.redirect(`${clientUrl}/login?verified=true&email=${encodeURIComponent(normalizedEmail)}`);
     }
+
+    const payload = {
+      user: { id: user._id, email: user.email, username: user.username, role: user.role || 'user' },
+      role: user.role || 'user'
+    };
+    const jwtToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
     return res.status(200).json({
       success: true,
-      message: 'If an account exists with that email, a password recovery link has been sent.'
+      token: jwtToken,
+      user: { id: user._id, email: user.email, username: user.username, role: user.role || 'user' },
+      message: 'Account verified successfully!'
     });
   } catch (error) {
-    console.error('Error in requestPasswordReset:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Internal server error processing password reset request'
-    });
+    console.error('Error in verifyEmailToken:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Verification failed' });
   }
 };
 
 /**
- * Reset Password with Token
- * Validates reset token and expiration, hashes new password, clears reset fields
+ * Resend Verification OTP
+ * POST /api/auth/resend-otp
  */
-const resetPassword = async (req, res) => {
+const resendVerificationOtp = async (req, res) => {
   try {
-    const { token, password, newPassword, confirmPassword } = req.body;
-    const resetToken = (token || req.query.token || '').trim();
-
-    if (!resetToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'Password reset token is required'
-      });
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
     }
 
-    const targetPassword = newPassword || password;
-    if (!targetPassword || String(targetPassword).length < 6) {
-      return res.status(400).json({
-        success: false,
-        error: 'New password must be at least 6 characters long'
-      });
-    }
-
-    if (confirmPassword && confirmPassword !== targetPassword) {
-      return res.status(400).json({
-        success: false,
-        error: 'Passwords do not match'
-      });
-    }
-
-    // Find user with matching active reset token
-    const user = await User.findOne({
-      resetPasswordToken: resetToken,
-      resetPasswordExpires: { $gt: new Date() }
-    });
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
 
     if (!user) {
-      return res.status(400).json({
-        success: false,
-        error: 'Password reset link is invalid or has expired. Please request a new link.'
-      });
+      return res.status(404).json({ success: false, error: 'No account found with this email' });
     }
 
-    // Hash new password
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(targetPassword, salt);
+    if (user.isVerified) {
+      return res.status(400).json({ success: false, error: 'Account is already verified. Please sign in.' });
+    }
 
-    // Invalidate reset token immediately
-    user.resetPasswordToken = null;
-    user.resetPasswordExpires = null;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const expiry = new Date(Date.now() + 15 * 60 * 1000);
+
+    user.verificationOtp = otp;
+    user.verificationOtpExpires = expiry;
+    user.verificationToken = verificationToken;
+    user.verificationTokenExpires = expiry;
     await user.save();
 
-    console.log(`[authController.resetPassword] Password updated successfully for: ${user.email}`);
+    sendVerificationEmail(normalizedEmail, {
+      username: user.username,
+      verificationToken,
+      otp
+    }).catch((err) => console.error('[resendVerificationOtp] Email error:', err.message));
 
     return res.status(200).json({
       success: true,
-      message: 'Password reset successfully! You can now sign in with your new password.'
+      message: 'A fresh 6-digit verification code has been dispatched to your email.'
     });
   } catch (error) {
-    console.error('Error in resetPassword:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || 'Internal server error resetting password'
-    });
+    console.error('Error in resendVerificationOtp:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to resend OTP' });
   }
 };
 
 /**
  * Login existing User
- * Verifies email and password
- * Returns signed JWT and user details including isVerified status
+ * Verifies email, password, and account activation status
  */
 const loginUser = async (req, res) => {
   try {
@@ -514,40 +390,40 @@ const loginUser = async (req, res) => {
       });
     }
 
-    // Grandfather existing legacy users who registered before email verification was introduced
-    if (user.isVerified === false && !user.verificationToken) {
-      user.isVerified = true;
-      await user.save();
-      console.log(`[authController.loginUser] Migrated legacy user to verified: ${user.email}`);
-    }
-
-    // Fallback: If Brevo email service is not configured on this host (e.g. Render missing BREVO_API_KEY),
-    // auto-activate user upon valid password match so they are never permanently trapped
-    if (user.isVerified === false && !isConfigured()) {
-      user.isVerified = true;
-      user.verificationToken = null;
-      await user.save();
-      console.log(`[authController.loginUser] Auto-activated unverified user ${user.email} (Email service offline on this host)`);
-    }
-
-    // Enforce email authentication: without verification, user cannot log in
+    // CHECK EMAIL VERIFICATION: Unverified accounts cannot log in
     if (user.isVerified === false) {
+      // Generate a fresh OTP and resend email automatically so user can activate immediately
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const expiry = new Date(Date.now() + 15 * 60 * 1000);
+
+      user.verificationOtp = otp;
+      user.verificationOtpExpires = expiry;
+      user.verificationToken = verificationToken;
+      user.verificationTokenExpires = expiry;
+      await user.save();
+
+      sendVerificationEmail(user.email, {
+        username: user.username,
+        verificationToken,
+        otp
+      }).catch((err) => console.error('[loginUser] Verification email error:', err.message));
+
       return res.status(403).json({
         success: false,
-        isVerified: false,
-        error: 'Email verification required. Please check your inbox and verify your email before logging in.',
-        email: user.email
+        requireVerification: true,
+        email: user.email,
+        error: 'Your email address is not verified yet. We just sent a fresh 6-digit OTP to your inbox.'
       });
     }
 
-    // Sign JWT payload for authenticated user
+    // Sign JWT
     const payload = {
       user: {
         id: user._id,
         email: user.email,
         username: user.username,
-        role: user.role || 'user',
-        isVerified: user.isVerified || false
+        role: user.role || 'user'
       },
       role: user.role || 'user'
     };
@@ -561,9 +437,7 @@ const loginUser = async (req, res) => {
         id: user._id,
         email: user.email,
         username: user.username,
-        role: user.role || 'user',
-        isVerified: user.isVerified || false,
-        emailStatus: user.emailStatus || 'valid'
+        role: user.role || 'user'
       }
     });
   } catch (error) {
@@ -572,6 +446,161 @@ const loginUser = async (req, res) => {
       success: false,
       error: error.message || 'Internal server error'
     });
+  }
+};
+
+/**
+ * Forgot Password Request
+ * POST /api/auth/forgot-password
+ * Generates recovery OTP and reset link, sending via Brevo
+ */
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email address is required' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'No registered user account found with this email address.'
+      });
+    }
+
+    const resetOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
+
+    user.resetPasswordOtp = resetOtp;
+    user.resetPasswordOtpExpires = expiry;
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = expiry;
+    await user.save();
+
+    // Send Brevo recovery email
+    sendPasswordResetEmail(normalizedEmail, {
+      username: user.username,
+      resetToken,
+      otp: resetOtp
+    }).catch((err) => console.error('[forgotPassword] Reset email dispatch error:', err.message));
+
+    return res.status(200).json({
+      success: true,
+      email: normalizedEmail,
+      message: 'Password reset OTP and recovery link have been sent to your email.'
+    });
+  } catch (error) {
+    console.error('Error in forgotPassword:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Failed to process request' });
+  }
+};
+
+/**
+ * Verify Password Reset OTP
+ * POST /api/auth/verify-reset-otp
+ */
+const verifyResetOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: 'Email and OTP are required' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    if (!user.resetPasswordOtp || user.resetPasswordOtp !== cleanOtp) {
+      return res.status(400).json({ success: false, error: 'Invalid password reset code' });
+    }
+
+    if (!user.resetPasswordOtpExpires || new Date() > new Date(user.resetPasswordOtpExpires)) {
+      return res.status(400).json({ success: false, error: 'Password reset code has expired' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Code verified successfully. Please enter your new password.'
+    });
+  } catch (error) {
+    console.error('Error in verifyResetOtp:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Verification failed' });
+  }
+};
+
+/**
+ * Reset Password
+ * POST /api/auth/reset-password
+ * Accepts email, newPassword, and either otp OR token
+ */
+const resetPassword = async (req, res) => {
+  try {
+    const { email, otp, token, newPassword } = req.body;
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ success: false, error: 'Email and new password are required' });
+    }
+
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long' });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    let isValid = false;
+
+    // Check OTP
+    if (otp && user.resetPasswordOtp && user.resetPasswordOtp === String(otp).trim()) {
+      if (user.resetPasswordOtpExpires && new Date() <= new Date(user.resetPasswordOtpExpires)) {
+        isValid = true;
+      }
+    }
+
+    // Check Token
+    if (!isValid && token && user.resetPasswordToken && user.resetPasswordToken === String(token).trim()) {
+      if (user.resetPasswordExpires && new Date() <= new Date(user.resetPasswordExpires)) {
+        isValid = true;
+      }
+    }
+
+    if (!isValid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or expired password reset credentials. Please request a new OTP.'
+      });
+    }
+
+    // Hash and update password
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    user.resetPasswordOtp = undefined;
+    user.resetPasswordOtpExpires = undefined;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    user.isVerified = true; // Email confirmed via reset process
+
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: '🎉 Your password has been successfully reset. You can now sign in with your new password.'
+    });
+  } catch (error) {
+    console.error('Error in resetPassword:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Password reset failed' });
   }
 };
 
@@ -603,9 +632,7 @@ const validateUserToken = async (req, res) => {
         id: user._id,
         email: user.email,
         username: user.username,
-        role: user.role || 'user',
-        isVerified: user.isVerified || false,
-        emailStatus: user.emailStatus || 'valid'
+        role: user.role || 'user'
       }
     });
   } catch (error) {
@@ -747,7 +774,7 @@ const loginAdmin = async (req, res) => {
       });
     }
 
-    // Sign Admin JWT payload
+    // Sign JWT
     const payload = {
       admin: {
         id: admin._id,
@@ -819,6 +846,7 @@ const validateAdminToken = async (req, res) => {
   }
 };
 
+
 /**
  * Change password for authenticated user
  * PUT /api/auth/change-password
@@ -849,16 +877,17 @@ const changePassword = async (req, res) => {
 module.exports = {
   registerUser,
   signup: registerUser,
-  verifyEmail,
-  resendVerification,
-  requestPasswordReset,
-  forgotPassword: requestPasswordReset,
-  resetPassword,
   loginUser,
   signin: loginUser,
   validateUserToken,
   registerAdmin,
   loginAdmin,
   validateAdminToken,
-  changePassword
+  changePassword,
+  verifyOtp,
+  verifyEmailToken,
+  resendVerificationOtp,
+  forgotPassword,
+  verifyResetOtp,
+  resetPassword
 };

@@ -90,6 +90,12 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
         toast.error(response.data?.error || response.data?.message || 'Login failed');
       }
     } catch (err) {
+      if (err.response?.data?.requireVerification) {
+        toast.warning(err.response.data.error || 'Please verify your email before logging in.');
+        onClose();
+        navigate(`/login?email=${encodeURIComponent(email)}`);
+        return;
+      }
       toast.error(err.response?.data?.error || err.response?.data?.message || 'Authentication failed');
     } finally {
       setLoading(false);
@@ -129,11 +135,9 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
       });
 
       if (response.data && response.data.success) {
-        toast.success('🎉 Welcome to iMovies! Your user account has been created.');
-        localStorage.setItem('imovies-user-token', response.data.token);
-        localStorage.setItem('imovies-user', JSON.stringify(response.data.user || { username, email, role: 'user' }));
+        toast.info(response.data.message || 'Verification code sent to your email! Please verify your account.');
         onClose();
-        navigate('/home');
+        navigate('/login');
       } else {
         toast.error(response.data?.error || response.data?.message || 'Registration failed');
       }

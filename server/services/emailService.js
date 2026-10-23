@@ -1,920 +1,535 @@
 /**
  * emailService.js
- * Production-Ready Brevo (Sendinblue) Transactional Email Service for iMovies
- *
- * Core Features:
- * 1. Base Methods: `sendEmail`, `sendTemplateEmail`
- * 2. High-Level Wrappers:
- *    - `sendVerificationEmail(email, verificationTokenOrLink, userName)`
- *    - `sendPasswordResetEmail(email, resetTokenOrLink, userName)`
- *    - `sendBookingConfirmationEmail(emailOrBookingId, bookingDetails)`
- *    - `sendBookingStatusUpdateEmail(email, statusDetails)`
- * 3. Backward Compatibility: `sendTicketEmail`
- * 4. Resilient error handling (HTTP 429 rate-limiting, network retries)
- * 5. Sanitized HTML rendering to prevent injection
+ * Production-Ready Transactional Email Service for iMovies powered by Brevo (Sendinblue)
  */
 
-const mongoose = require('mongoose');
-const { brevoClient, SENDER_EMAIL, SENDER_NAME, CLIENT_URL, isConfigured } = require('../config/brevoConfig');
-const Booking = require('../models/bookingModel');
-const Movie = require('../models/movieModel');
-const Theatre = require('../models/theatreModel');
-const Show = require('../models/showModel');
-const User = require('../models/userModel');
+const { BrevoClient } = require('@getbrevo/brevo');
+const emailConfig = require('../config/emailConfig');
+
+// Initialize Brevo Client
+let brevoClient = null;
+try {
+  brevoClient = new BrevoClient({ apiKey: emailConfig.BREVO_API_KEY });
+  console.log('[emailService] Brevo Transactional Email client initialized.');
+} catch (err) {
+  console.error('[emailService Error] Failed to initialize Brevo client:', err.message);
+}
 
 /**
- * Escape user-controlled strings to prevent HTML injection in emails
+ * Helper to normalize recipients into array of { email, name }
  */
-const escapeHtml = (unsafe) => {
-  if (unsafe === null || unsafe === undefined) return '';
-  return String(unsafe)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-};
-
-/**
- * Validate public HTTP/HTTPS URL
- */
-const isValidHttpUrl = (urlStr) => {
-  if (!urlStr || typeof urlStr !== 'string') return false;
-  try {
-    const parsed = new URL(urlStr);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch (_) {
-    return false;
-  }
-};
-
-/**
- * Parse recipient input into Brevo format [{ email, name }]
- */
-const formatRecipients = (to, defaultName = '') => {
+const normalizeRecipients = (to) => {
+  if (!to) return [];
   if (Array.isArray(to)) {
-    return to.map((item) => {
-      if (typeof item === 'string') {
-        return { email: item.trim(), name: defaultName || item.split('@')[0] };
-      }
-      return {
-        email: (item.email || '').trim(),
-        name: item.name || defaultName || (item.email || '').split('@')[0]
-      };
-    });
+    return to.map((item) => (typeof item === 'string' ? { email: item } : item));
   }
-
   if (typeof to === 'string') {
-    return [{ email: to.trim(), name: defaultName || to.split('@')[0] }];
+    return [{ email: to }];
   }
-
-  if (to && typeof to === 'object' && to.email) {
-    return [{
-      email: to.email.trim(),
-      name: to.name || defaultName || to.email.split('@')[0]
-    }];
+  if (typeof to === 'object' && to.email) {
+    return [to];
   }
-
   return [];
 };
 
-// ============================================================================
-// BASE METHODS
-// ============================================================================
+/**
+ * Handle and structure errors from Brevo SDK
+ */
+const handleBrevoError = (error, context = '') => {
+  const status = error.statusCode || error.status || (error.response ? error.response.status : null);
+  const body = error.body || (error.response ? error.response.body : null);
+  const message = error.message || 'Unknown Brevo error';
+
+  if (status === 429) {
+    console.error(`[emailService Rate Limit 429] ${context}: Brevo API rate limit exceeded. Please backoff requests.`, body);
+  } else if (status === 401 || status === 403) {
+    console.error(`[emailService Auth ${status}] ${context}: Invalid Brevo API Key or unauthorized sender.`, body);
+  } else if (status === 400) {
+    console.error(`[emailService Bad Request 400] ${context}: Invalid email payload parameters.`, body);
+  } else {
+    console.error(`[emailService Failure] ${context}: ${message}`, body || error);
+  }
+
+  return {
+    success: false,
+    status,
+    error: message,
+    details: body
+  };
+};
 
 /**
- * Base method: Send an arbitrary transactional email via Brevo
- *
- * @param {object} options
- * @param {string|Array<object>} options.to - Recipient email or array of recipients
- * @param {string} options.subject - Email subject line
- * @param {string} options.htmlContent - HTML email body
- * @param {string} [options.textContent] - Plain text alternative
- * @param {object} [options.sender] - Custom sender { email, name }
- * @param {object} [options.params] - Dynamic template parameters
- * @param {Array<string>} [options.tags] - Category tags for metrics
- * @param {object} [options.replyTo] - Reply-To address
- * @returns {Promise<{ success: boolean, messageId?: string, error?: string, statusCode?: number }>}
+ * Base Method: sendEmail
+ * Sends a transactional email using raw HTML or text content
  */
 const sendEmail = async ({
   to,
   subject,
   htmlContent,
   textContent,
-  sender,
-  params,
-  tags,
-  replyTo
-}) => {
-  if (!isConfigured()) {
-    const errorMsg = 'Brevo email service is not configured (missing BREVO_API_KEY)';
-    console.warn(`[emailService.sendEmail] ${errorMsg}`);
-    return { success: false, error: errorMsg, statusCode: 503 };
-  }
-
-  const recipients = formatRecipients(to);
-  if (recipients.length === 0) {
-    return { success: false, error: 'Recipient email address is required', statusCode: 400 };
-  }
-
-  const senderObj = {
-    email: (sender?.email || SENDER_EMAIL).trim(),
-    name: sender?.name || SENDER_NAME
-  };
-
-  const payload = {
-    sender: senderObj,
-    to: recipients,
-    subject: subject || 'iMovies Notification',
-    htmlContent,
-    textContent: textContent || undefined,
-    params: params || undefined,
-    tags: Array.isArray(tags) ? tags : undefined,
-    replyTo: replyTo ? { email: replyTo.email, name: replyTo.name } : undefined
-  };
-
-  try {
-    const response = await brevoClient.transactionalEmails.sendTransacEmail(payload);
-    const messageId = response?.messageId || response?.data?.messageId || `brevo_${Date.now()}`;
-
-    console.log(`[emailService] Successfully sent transactional email "${subject}" to ${recipients[0].email} (MessageID: ${messageId})`);
-    return {
-      success: true,
-      messageId,
-      data: response
-    };
-  } catch (error) {
-    const status = error.statusCode || error.status || 500;
-    const isRateLimited = status === 429;
-    const errorDetail =
-      error.body?.message ||
-      error.response?.data?.message ||
-      error.message ||
-      'Unknown error sending email via Brevo';
-
-    console.error(`[emailService] Brevo Error (${status}): ${errorDetail}`);
-
-    if (isRateLimited) {
-      console.warn('[emailService] Rate limit (HTTP 429) hit on Brevo API. Consider queueing requests.');
-    }
-
-    return {
-      success: false,
-      statusCode: status,
-      isRateLimited,
-      error: errorDetail
-    };
-  }
-};
-
-/**
- * Base method: Send an email using a pre-configured Brevo template ID
- *
- * @param {object} options
- * @param {string|Array} options.to - Recipient(s)
- * @param {number} options.templateId - Brevo template ID
- * @param {object} [options.params] - Dynamic template variables
- * @param {object} [options.sender] - Custom sender override
- * @param {Array<string>} [options.tags] - Category tags
- * @param {object} [options.replyTo] - Reply-To address
- */
-const sendTemplateEmail = async ({
-  to,
-  templateId,
   params = {},
-  sender,
-  tags,
-  replyTo
+  tags = ['transactional'],
+  retryCount = 1
 }) => {
-  if (!templateId || isNaN(Number(templateId))) {
-    return { success: false, error: 'A valid numeric Brevo templateId is required', statusCode: 400 };
-  }
-
-  if (!isConfigured()) {
-    return { success: false, error: 'Brevo email service is not configured', statusCode: 503 };
-  }
-
-  const recipients = formatRecipients(to);
+  const recipients = normalizeRecipients(to);
   if (recipients.length === 0) {
-    return { success: false, error: 'Recipient email address is required', statusCode: 400 };
+    console.warn('[emailService] sendEmail aborted: No recipients specified.');
+    return { success: false, error: 'Recipient email is required' };
   }
 
+  if (!brevoClient) {
+    console.error('[emailService] sendEmail aborted: Brevo client is not initialized.');
+    return { success: false, error: 'Email service unavailable' };
+  }
+
+  // Construct payload strictly conforming to Brevo v6 API requirements
   const payload = {
-    sender: sender ? { email: sender.email, name: sender.name } : { email: SENDER_EMAIL, name: SENDER_NAME },
+    sender: {
+      name: emailConfig.SENDER_NAME,
+      email: emailConfig.SENDER_EMAIL
+    },
     to: recipients,
-    templateId: Number(templateId),
-    params,
-    tags: Array.isArray(tags) ? tags : undefined,
-    replyTo: replyTo ? { email: replyTo.email, name: replyTo.name } : undefined
+    subject: subject || 'Notification from iMovies'
   };
+
+  if (htmlContent) {
+    payload.htmlContent = htmlContent;
+  }
+
+  if (textContent && typeof textContent === 'string' && textContent.trim().length > 0) {
+    payload.textContent = textContent.trim();
+  } else if (!htmlContent) {
+    payload.textContent = 'Notification from iMovies';
+  }
+
+  if (params && typeof params === 'object' && Object.keys(params).length > 0) {
+    payload.params = params;
+  }
+
+  if (Array.isArray(tags) && tags.length > 0) {
+    payload.tags = tags;
+  }
 
   try {
     const response = await brevoClient.transactionalEmails.sendTransacEmail(payload);
-    const messageId = response?.messageId || response?.data?.messageId || `brevo_tpl_${Date.now()}`;
-    return { success: true, messageId, data: response };
+    const messageId = response?.messageId || response?.messageIds?.[0] || 'sent';
+    console.log(`[emailService] Transactional email sent to [${recipients.map((r) => r.email).join(', ')}] | MessageID: ${messageId}`);
+    return { success: true, messageId, response };
   } catch (error) {
-    const status = error.statusCode || error.status || 500;
-    return {
-      success: false,
-      statusCode: status,
-      error: error.body?.message || error.message || 'Failed to send Brevo template email'
-    };
-  }
-};
-
-// ============================================================================
-// DEDICATED HIGH-LEVEL WRAPPER FUNCTIONS
-// ============================================================================
-
-/**
- * 1. Account Activation / Verification Email
- *
- * @param {string} email - Recipient user email
- * @param {string} verificationTokenOrLink - Verification token or full URL
- * @param {string} [userName] - User's display name
- */
-const sendVerificationEmail = async (email, verificationTokenOrLink, userName = '') => {
-  const safeName = escapeHtml(userName || email.split('@')[0]);
-  const isLink = verificationTokenOrLink && verificationTokenOrLink.startsWith('http');
-  const verifyUrl = isLink
-    ? verificationTokenOrLink
-    : `${CLIENT_URL}/verify-email?token=${encodeURIComponent(verificationTokenOrLink)}&email=${encodeURIComponent(email)}`;
-  const safeUrl = escapeHtml(verifyUrl);
-
-  const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Verify Your iMovies Account</title>
-  <style>
-    body { margin: 0; padding: 0; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f1f5f9; }
-    .email-container { max-width: 600px; margin: 20px auto; background: #131926; border-radius: 14px; overflow: hidden; border: 1px solid #1f293d; }
-    .header { background: linear-gradient(135deg, #e50914 0%, #8b0000 100%); padding: 32px 24px; text-align: center; }
-    .content { padding: 32px 28px; }
-    .btn { background: #e50914; color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 700; font-size: 15px; display: inline-block; }
-    .footer { background: #0a0e17; padding: 24px; text-align: center; border-top: 1px solid #1a2334; color: #64748b; font-size: 12px; }
-  </style>
-</head>
-<body style="background-color: #0b0f19; margin: 0; padding: 20px 10px;">
-  <center>
-    <table class="email-container" width="100%" style="max-width: 600px; background: #131926; border-radius: 14px; border: 1px solid #1f293d;">
-      <tr>
-        <td class="header" style="background: linear-gradient(135deg, #e50914 0%, #8b0000 100%); padding: 32px 24px; text-align: center;">
-          <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 800;">🎬 iMovies</h1>
-          <p style="margin: 8px 0 0; color: #ffe4e6; font-size: 15px;">Welcome to the Cinema Experience</p>
-        </td>
-      </tr>
-      <tr>
-        <td class="content" style="padding: 32px 28px;">
-          <h2 style="margin: 0 0 16px; color: #ffffff; font-size: 20px;">Verify Your Email Address</h2>
-          <p style="margin: 0 0 16px; color: #cbd5e1; font-size: 15px; line-height: 1.6;">
-            Hello <strong>${safeName}</strong>,<br><br>
-            Thank you for creating an account on iMovies! To activate your profile, book cinema tickets, and access your personalized watchlist, please verify your email address.
-          </p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${safeUrl}" class="btn" style="background: #e50914; color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 700; display: inline-block;">
-              Activate My Account
-            </a>
-          </div>
-          <p style="margin: 0 0 12px; color: #94a3b8; font-size: 13px; line-height: 1.5;">
-            Or copy and paste this verification URL into your browser:<br>
-            <span style="color: #38bdf8; word-break: break-all;">${safeUrl}</span>
-          </p>
-          <div style="background: rgba(229, 9, 20, 0.08); border-left: 4px solid #e50914; padding: 12px 16px; border-radius: 4px; margin-top: 24px; color: #cbd5e1; font-size: 12px;">
-            ⚠️ This link will expire in 24 hours. If you did not create an account on iMovies, please ignore this email.
-          </div>
-        </td>
-      </tr>
-      <tr>
-        <td class="footer" style="background: #0a0e17; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2334;">
-          <p style="margin: 0 0 4px;">&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
-          <p style="margin: 0;">Questions? Contact us at support@imovies.com</p>
-        </td>
-      </tr>
-    </table>
-  </center>
-</body>
-</html>
-  `;
-
-  const textContent = `
-Verify Your iMovies Account
-========================================
-
-Hello ${userName || email.split('@')[0]},
-
-Thank you for joining iMovies! Please click the link below to verify your email address and activate your account:
-
-${verifyUrl}
-
-This verification link will expire in 24 hours.
-
-If you didn't create an account, you can safely ignore this email.
-
-(c) ${new Date().getFullYear()} iMovies Inc.
-  `.trim();
-
-  return await sendEmail({
-    to: { email, name: userName || email.split('@')[0] },
-    subject: '🎬 Verify Your iMovies Account',
-    htmlContent,
-    textContent,
-    tags: ['account-verification', 'auth']
-  });
-};
-
-/**
- * 2. Password Recovery / Reset Email
- *
- * @param {string} email - Recipient user email
- * @param {string} resetTokenOrLink - Reset token or full URL
- * @param {string} [userName] - User's display name
- */
-const sendPasswordResetEmail = async (email, resetTokenOrLink, userName = '') => {
-  const safeName = escapeHtml(userName || email.split('@')[0]);
-  const isLink = resetTokenOrLink && resetTokenOrLink.startsWith('http');
-  const resetUrl = isLink
-    ? resetTokenOrLink
-    : `${CLIENT_URL}/reset-password?token=${encodeURIComponent(resetTokenOrLink)}&email=${encodeURIComponent(email)}`;
-  const safeUrl = escapeHtml(resetUrl);
-
-  const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Reset Your iMovies Password</title>
-  <style>
-    body { margin: 0; padding: 0; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f1f5f9; }
-    .email-container { max-width: 600px; margin: 20px auto; background: #131926; border-radius: 14px; overflow: hidden; border: 1px solid #1f293d; }
-    .header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-bottom: 2px solid #e50914; padding: 28px 24px; text-align: center; }
-    .content { padding: 32px 28px; }
-    .btn { background: #e50914; color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 700; font-size: 15px; display: inline-block; }
-    .footer { background: #0a0e17; padding: 20px; text-align: center; border-top: 1px solid #1a2334; color: #64748b; font-size: 12px; }
-  </style>
-</head>
-<body style="background-color: #0b0f19; margin: 0; padding: 20px 10px;">
-  <center>
-    <table class="email-container" width="100%" style="max-width: 600px; background: #131926; border-radius: 14px; border: 1px solid #1f293d;">
-      <tr>
-        <td class="header" style="background: #151c2a; border-bottom: 2px solid #e50914; padding: 28px 24px; text-align: center;">
-          <h1 style="margin: 0; color: #e50914; font-size: 26px; font-weight: 800;">🎬 iMovies</h1>
-          <p style="margin: 6px 0 0; color: #94a3b8; font-size: 14px;">Password Recovery Request</p>
-        </td>
-      </tr>
-      <tr>
-        <td class="content" style="padding: 32px 28px;">
-          <h2 style="margin: 0 0 16px; color: #ffffff; font-size: 20px;">Reset Your Password</h2>
-          <p style="margin: 0 0 16px; color: #cbd5e1; font-size: 15px; line-height: 1.6;">
-            Hello <strong>${safeName}</strong>,<br><br>
-            We received a request to reset the password for your iMovies account. Click the button below to choose a new, secure password.
-          </p>
-          <div style="text-align: center; margin: 30px 0;">
-            <a href="${safeUrl}" class="btn" style="background: #e50914; color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 700; display: inline-block;">
-              Reset Password
-            </a>
-          </div>
-          <p style="margin: 0 0 12px; color: #94a3b8; font-size: 13px; line-height: 1.5;">
-            Or copy and paste this link in your browser:<br>
-            <span style="color: #38bdf8; word-break: break-all;">${safeUrl}</span>
-          </p>
-          <div style="background: rgba(234, 179, 8, 0.08); border-left: 4px solid #eab308; padding: 12px 16px; border-radius: 4px; margin-top: 24px; color: #fef08a; font-size: 12px;">
-            🔒 This password reset link is valid for 1 hour. If you did not make this request, your account is safe and no action is needed.
-          </div>
-        </td>
-      </tr>
-      <tr>
-        <td class="footer" style="background: #0a0e17; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2334;">
-          <p style="margin: 0 0 4px;">&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
-        </td>
-      </tr>
-    </table>
-  </center>
-</body>
-</html>
-  `;
-
-  const textContent = `
-Reset Your iMovies Password
-========================================
-
-Hello ${userName || email.split('@')[0]},
-
-We received a request to reset your iMovies password. Use the link below to set a new password:
-
-${resetUrl}
-
-This link is valid for 1 hour. If you didn't request a password reset, you can safely ignore this message.
-
-(c) ${new Date().getFullYear()} iMovies Inc.
-  `.trim();
-
-  return await sendEmail({
-    to: { email, name: userName || email.split('@')[0] },
-    subject: '🔒 Reset Your iMovies Password',
-    htmlContent,
-    textContent,
-    tags: ['password-reset', 'auth']
-  });
-};
-
-/**
- * 3. Booking Confirmation Receipt Email
- *
- * Supports dual invocation:
- * - Direct: `sendBookingConfirmationEmail(email, bookingDetails)`
- * - Legacy / Idempotent DB: `sendBookingConfirmationEmail(bookingId)`
- *
- * @param {string|object} emailOrBookingId
- * @param {object} [bookingDetails]
- */
-const sendBookingConfirmationEmail = async (param1, param2 = null) => {
-  // Case A: Passed an object with bookingId
-  if (param1 && typeof param1 === 'object') {
-    if (param1.bookingId) {
-      return await _processDatabaseBookingConfirmation(param1.bookingId);
+    // Retry once on transient network errors (e.g. 5xx or network timeout, excluding 400/401/403)
+    const status = error.statusCode || error.status;
+    if (retryCount > 0 && (!status || status >= 500)) {
+      console.warn(`[emailService] Retrying sendEmail to [${recipients[0]?.email}] due to transient error...`);
+      await new Promise((res) => setTimeout(res, 1000));
+      return sendEmail({ to, subject, htmlContent, textContent, params, tags, retryCount: retryCount - 1 });
     }
+    return handleBrevoError(error, `sendEmail to ${recipients[0]?.email}`);
   }
-
-  // Case B: Passed a string (either email or bookingId)
-  if (typeof param1 === 'string') {
-    const trimmed = param1.trim();
-    if (trimmed.includes('@')) {
-      const details = (param2 && typeof param2 === 'object') ? param2 : {};
-      return await _sendDirectBookingConfirmation(trimmed, details);
-    } else {
-      return await _processDatabaseBookingConfirmation(trimmed);
-    }
-  }
-
-  return { success: false, error: 'Invalid parameters provided to sendBookingConfirmationEmail' };
 };
 
 /**
- * Helper to process database booking confirmation with idempotency
+ * Base Method: sendTemplateEmail
+ * Sends an email using a registered Brevo template ID
  */
-const _processDatabaseBookingConfirmation = async (bookingId) => {
-  const booking = await Booking.findOne({ bookingId });
-  if (!booking) {
-    return { success: false, skipped: true, error: `Booking not found: ${bookingId}` };
-  }
-
-  if (booking.paymentStatus !== 'Completed') {
-    return { success: false, skipped: true, reason: `Payment status is ${booking.paymentStatus}` };
-  }
-
-  // Idempotency check: if already sent successfully, return immediately
-  if (booking.confirmationEmailSent === true || booking.confirmationEmailStatus === 'sent') {
-    return {
-      success: true,
-      alreadySent: true,
-      status: 'sent',
-      messageId: booking.confirmationEmailMessageId,
-      message: 'Booking confirmation email was already delivered'
-    };
-  }
-
-  // Atomic claim: Claim if not sent and status is not 'sent'.
-  // Re-claim if status was 'sending' but last updated > 60 seconds ago (recovering from crashes or timeouts).
-  const staleThreshold = new Date(Date.now() - 60 * 1000);
-  const claimed = await Booking.findOneAndUpdate(
-    {
-      bookingId,
-      paymentStatus: 'Completed',
-      confirmationEmailSent: false,
-      $or: [
-        { confirmationEmailStatus: { $in: ['not_sent', 'pending', 'failed'] } },
-        { confirmationEmailStatus: 'sending', updatedAt: { $lt: staleThreshold } },
-        { confirmationEmailStatus: { $exists: false } }
-      ]
-    },
-    {
-      $set: {
-        confirmationEmailStatus: 'sending',
-        updatedAt: new Date()
-      }
-    },
-    { new: true }
-  );
-
-  if (!claimed) {
-    const fresh = await Booking.findOne({ bookingId });
-    if (fresh && (fresh.confirmationEmailSent || fresh.confirmationEmailStatus === 'sent')) {
-      return { success: true, alreadySent: true, status: 'sent', messageId: fresh.confirmationEmailMessageId };
-    }
-    return { success: false, skipped: true, reason: 'Email dispatch already in progress' };
+const sendTemplateEmail = async ({ to, templateId, params = {}, tags = ['template'] }) => {
+  const recipients = normalizeRecipients(to);
+  if (recipients.length === 0 || !templateId) {
+    return { success: false, error: 'Recipient and templateId are required' };
   }
 
   try {
-    // Populate metadata safely
-    let customerName = claimed.customerName || '';
-    if (!customerName && claimed.userEmail) {
-      try {
-        const user = await User.findOne({ email: claimed.userEmail.toLowerCase().trim() }).select('username');
-        if (user && user.username) customerName = user.username;
-      } catch (userErr) {
-        console.warn(`[emailService] Could not lookup user for ${claimed.userEmail}:`, userErr.message);
-      }
-    }
-
-    let posterUrl = claimed.posterUrl || '';
-    if (!posterUrl && claimed.movieId) {
-      try {
-        let movie = null;
-        if (mongoose.Types.ObjectId.isValid(claimed.movieId)) {
-          movie = await Movie.findById(claimed.movieId).select('posterUrl');
-        }
-        if (!movie) {
-          movie = await Movie.findOne({
-            $or: [
-              { movieId: claimed.movieId },
-              { tmdbId: claimed.movieId }
-            ]
-          }).select('posterUrl');
-        }
-        if (movie && movie.posterUrl) posterUrl = movie.posterUrl;
-      } catch (movieErr) {
-        console.warn(`[emailService] Could not lookup movie poster for ${claimed.movieId}:`, movieErr.message);
-      }
-    }
-
-    let theatreLocation = '';
-    if (claimed.showId) {
-      try {
-        const show = await Show.findOne({ showId: claimed.showId });
-        if (show && show.theatreId) {
-          const theatre = await Theatre.findOne({ theatreId: show.theatreId }).select('location');
-          if (theatre && theatre.location) theatreLocation = theatre.location;
-        }
-      } catch (theatreErr) {
-        console.warn(`[emailService] Could not lookup theatre for show ${claimed.showId}:`, theatreErr.message);
-      }
-    }
-
-    const details = {
-      bookingId: claimed.bookingId,
-      movieTitle: claimed.movieName,
-      theatreName: claimed.theatreName,
-      theatreLocation,
-      screen: claimed.screen || 'Screen 1',
-      showDate: claimed.showDate,
-      showTime: claimed.showTime,
-      selectedSeats: claimed.selectedSeats || [],
-      totalAmount: claimed.totalAmount,
-      paymentId: claimed.razorpayPaymentId || 'N/A',
-      paymentStatus: 'Confirmed',
-      posterUrl,
-      customerName,
-      ticketsData: claimed.ticketsData
-    };
-
-    const result = await _sendDirectBookingConfirmation(claimed.userEmail, details);
-
-    if (result.success) {
-      await Booking.findOneAndUpdate(
-        { bookingId },
-        {
-          $set: {
-            confirmationEmailSent: true,
-            confirmationEmailStatus: 'sent',
-            confirmationEmailSentAt: new Date(),
-            confirmationEmailMessageId: result.messageId || '',
-            confirmationEmailError: ''
-          }
-        }
-      );
-    } else {
-      await Booking.findOneAndUpdate(
-        { bookingId },
-        {
-          $set: {
-            confirmationEmailSent: false,
-            confirmationEmailStatus: 'failed',
-            confirmationEmailError: result.error || 'Brevo dispatch error'
-          }
-        }
-      );
-    }
-
-    return result;
-  } catch (procErr) {
-    console.error(`[emailService] Fatal error processing booking confirmation for ${bookingId}:`, procErr);
-    await Booking.findOneAndUpdate(
-      { bookingId },
-      {
-        $set: {
-          confirmationEmailSent: false,
-          confirmationEmailStatus: 'failed',
-          confirmationEmailError: procErr.message || 'Processing error'
-        }
-      }
-    );
-    return { success: false, error: procErr.message };
+    const response = await brevoClient.transactionalEmails.sendTransacEmail({
+      sender: { name: emailConfig.SENDER_NAME, email: emailConfig.SENDER_EMAIL },
+      to: recipients,
+      templateId: Number(templateId),
+      params,
+      tags
+    });
+    return { success: true, messageId: response?.messageId, response };
+  } catch (error) {
+    return handleBrevoError(error, `sendTemplateEmail #${templateId}`);
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HIGH-LEVEL FEATURE WRAPPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Render and send direct booking confirmation
+ * Wrapper: sendVerificationEmail
+ * Sends account activation email containing both:
+ * 1. An instant 6-digit OTP code to enter in the application window
+ * 2. A direct one-click verification link
  */
-const _sendDirectBookingConfirmation = async (email, details = {}) => {
+const sendVerificationEmail = async (email, { username = 'Movie Fan', verificationToken, verificationLink, otp }) => {
+  const clientBase = emailConfig.CLIENT_URL;
+  const link = verificationLink || `${clientBase}/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Verify Your iMovies Account</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #080c14; margin: 0; padding: 24px; color: #f8fafc; }
+        .wrapper { max-width: 580px; margin: 0 auto; background: #111726; border-radius: 16px; overflow: hidden; border: 1px solid #243048; box-shadow: 0 20px 40px rgba(0,0,0,0.7); }
+        .header { background: linear-gradient(135deg, #e50914 0%, #87060d 100%); padding: 32px 24px; text-align: center; }
+        .logo { font-size: 32px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: 1px; }
+        .sublogo { color: #fecdd3; font-size: 14px; margin-top: 6px; font-weight: 500; }
+        .body { padding: 32px 28px; }
+        h2 { font-size: 22px; color: #ffffff; margin-top: 0; margin-bottom: 12px; font-weight: 700; }
+        p { color: #94a3b8; font-size: 15px; line-height: 1.6; margin: 0 0 20px; }
+        .otp-container { background: #0a0e1a; border: 2px dashed #e50914; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0; }
+        .otp-label { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; margin-bottom: 8px; }
+        .otp-code { font-family: 'Courier New', Courier, monospace; font-size: 36px; font-weight: 800; color: #ffffff; letter-spacing: 8px; margin: 6px 0; }
+        .otp-note { color: #ef4444; font-size: 12px; font-weight: 600; }
+        .divider { text-align: center; margin: 28px 0; position: relative; }
+        .divider::before { content: ""; position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: #233048; }
+        .divider span { background: #111726; position: relative; padding: 0 16px; color: #64748b; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+        .btn-wrapper { text-align: center; margin: 24px 0 12px; }
+        .btn { display: inline-block; background: #e50914; color: #ffffff !important; text-decoration: none; padding: 14px 34px; border-radius: 8px; font-weight: 700; font-size: 15px; box-shadow: 0 6px 20px rgba(229,9,20,0.4); }
+        .footer { background: #090d16; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2336; }
+      </style>
+    </head>
+    <body>
+      <div class="wrapper">
+        <div class="header">
+          <div class="logo">🎬 iMovies</div>
+          <div class="sublogo">Cinema Ticketing & Live Movie Experiences</div>
+        </div>
+        <div class="body">
+          <h2>Welcome aboard, ${username}!</h2>
+          <p>Thank you for signing up for iMovies. To complete your registration and secure your cinema account, please authenticate using the One-Time Password (OTP) below:</p>
+
+          <div class="otp-container">
+            <div class="otp-label">Your Account Verification OTP</div>
+            <div class="otp-code">${otp || '123456'}</div>
+            <div class="otp-note">⏱ Valid for the next 15 minutes</div>
+          </div>
+
+          <div class="divider">
+            <span>OR CLICK DIRECT LINK</span>
+          </div>
+
+          <div class="btn-wrapper">
+            <a href="${link}" class="btn" target="_blank">Verify My Account Instantly</a>
+          </div>
+
+          <p style="font-size: 13px; color: #64748b; text-align: center; margin-top: 20px;">
+            If you did not sign up for iMovies, please ignore this email safely.
+          </p>
+        </div>
+        <div class="footer">
+          <p>&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  return sendEmail({
+    to: email,
+    subject: `🔐 Your iMovies Verification Code: ${otp || ''} (Action Required)`,
+    htmlContent,
+    textContent: `Welcome to iMovies! Your verification OTP is: ${otp}. Or verify here: ${link}`,
+    tags: ['auth', 'verification']
+  });
+};
+
+/**
+ * Wrapper: sendPasswordResetEmail
+ * Sends a secure password recovery email containing:
+ * 1. A 6-digit OTP code to enter on the reset screen
+ * 2. A direct secure reset link
+ */
+const sendPasswordResetEmail = async (email, { username = 'Movie Lover', resetToken, resetLink, otp }) => {
+  const clientBase = emailConfig.CLIENT_URL;
+  const link = resetLink || `${clientBase}/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Reset Your iMovies Password</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #080c14; margin: 0; padding: 24px; color: #f8fafc; }
+        .wrapper { max-width: 580px; margin: 0 auto; background: #111726; border-radius: 16px; overflow: hidden; border: 1px solid #243048; box-shadow: 0 20px 40px rgba(0,0,0,0.7); }
+        .header { background: linear-gradient(135deg, #0284c7 0%, #034468 100%); padding: 32px 24px; text-align: center; }
+        .logo { font-size: 32px; font-weight: 800; color: #ffffff; margin: 0; letter-spacing: 1px; }
+        .sublogo { color: #bae6fd; font-size: 14px; margin-top: 6px; font-weight: 500; }
+        .body { padding: 32px 28px; }
+        h2 { font-size: 22px; color: #ffffff; margin-top: 0; margin-bottom: 12px; font-weight: 700; }
+        p { color: #94a3b8; font-size: 15px; line-height: 1.6; margin: 0 0 20px; }
+        .otp-container { background: #0a0e1a; border: 2px dashed #0284c7; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0; }
+        .otp-label { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; margin-bottom: 8px; }
+        .otp-code { font-family: 'Courier New', Courier, monospace; font-size: 36px; font-weight: 800; color: #ffffff; letter-spacing: 8px; margin: 6px 0; }
+        .otp-note { color: #38bdf8; font-size: 12px; font-weight: 600; }
+        .btn-wrapper { text-align: center; margin: 24px 0 12px; }
+        .btn { display: inline-block; background: #0284c7; color: #ffffff !important; text-decoration: none; padding: 14px 34px; border-radius: 8px; font-weight: 700; font-size: 15px; box-shadow: 0 6px 20px rgba(2,132,199,0.4); }
+        .security-alert { background: rgba(239,68,68,0.1); border-left: 4px solid #ef4444; padding: 12px 16px; border-radius: 4px; color: #fca5a5; font-size: 13px; line-height: 1.5; margin-top: 24px; }
+        .footer { background: #090d16; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2336; }
+      </style>
+    </head>
+    <body>
+      <div class="wrapper">
+        <div class="header">
+          <div class="logo">🎬 iMovies Security</div>
+          <div class="sublogo">Password Recovery Request</div>
+        </div>
+        <div class="body">
+          <h2>Hi ${username},</h2>
+          <p>We received a request to reset the password for your iMovies account. Use the 6-digit recovery OTP below to proceed:</p>
+
+          <div class="otp-container">
+            <div class="otp-label">Your Password Reset OTP</div>
+            <div class="otp-code">${otp || '987654'}</div>
+            <div class="otp-note">⏱ Valid for 15 minutes</div>
+          </div>
+
+          <div class="btn-wrapper">
+            <a href="${link}" class="btn" target="_blank">Reset Password via Link</a>
+          </div>
+
+          <div class="security-alert">
+            🛡️ <strong>Security Notice:</strong> If you did not initiate this password reset, please ignore this email. Your existing credentials remain completely secure.
+          </div>
+        </div>
+        <div class="footer">
+          <p>&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  return sendEmail({
+    to: email,
+    subject: `🔑 Your iMovies Password Reset Code: ${otp || ''}`,
+    htmlContent,
+    textContent: `Hi ${username}, your password reset OTP is ${otp}. Or visit: ${link}`,
+    tags: ['auth', 'password-reset']
+  });
+};
+
+/**
+ * Wrapper: sendBookingConfirmationEmail (also exported as sendTicketEmail)
+ * Sends a full cinema e-ticket confirmation with styling, details, seats, and simulated QR pass.
+ */
+const sendBookingConfirmationEmail = async (userEmail, ticketDetails = {}) => {
+  if (!userEmail) {
+    console.warn('[emailService] No recipient email specified for ticket confirmation');
+    return { success: false, error: 'Recipient email is required' };
+  }
+
   const {
     bookingId = 'N/A',
     movieTitle,
     movieName,
     title,
-    theatreName,
     theatre,
-    theatreLocation = '',
-    screen = 'Screen 1',
+    theatreName,
     showDate,
     date,
     showTime,
+    showtime,
     time,
-    selectedSeats = [],
-    seatNumbers = [],
-    seats = [],
+    seatNumbers,
+    selectedSeats,
+    seats,
     totalAmount,
-    amount,
-    paymentId = 'N/A',
-    paymentStatus = 'Confirmed',
-    posterUrl = '',
-    customerName = ''
-  } = details;
+    amount
+  } = ticketDetails;
 
-  const displayMovie = movieTitle || movieName || title || 'Cinema Ticket';
-  const displayTheatre = theatreName || theatre || 'iMovies Cinema';
+  const displayMovie = movieTitle || movieName || title || 'Cinema Blockbuster';
+  const displayTheatre = theatre || theatreName || 'iMovies Cinema Multiplex';
   const displayDate = showDate || date || 'N/A';
-  const displayTime = showTime || time || 'N/A';
+  const displayTime = showTime || showtime || time || 'N/A';
 
-  let seatList = [];
-  if (Array.isArray(selectedSeats) && selectedSeats.length > 0) seatList = selectedSeats;
-  else if (Array.isArray(seatNumbers) && seatNumbers.length > 0) seatList = seatNumbers;
-  else if (Array.isArray(seats) && seats.length > 0) seatList = seats;
+  // Format seat numbers
+  let displaySeats = 'N/A';
+  if (Array.isArray(seatNumbers)) {
+    displaySeats = seatNumbers.join(', ');
+  } else if (Array.isArray(selectedSeats)) {
+    displaySeats = selectedSeats.join(', ');
+  } else if (Array.isArray(seats)) {
+    displaySeats = seats.join(', ');
+  } else if (seatNumbers || selectedSeats || seats) {
+    displaySeats = String(seatNumbers || selectedSeats || seats);
+  }
 
-  const seatStr = seatList.length > 0 ? seatList.join(', ') : 'Assigned at entrance';
-  const total = totalAmount !== undefined ? totalAmount : (amount !== undefined ? amount : 0);
-  const safeName = escapeHtml(customerName || email.split('@')[0]);
-  const safeMovie = escapeHtml(displayMovie);
-  const safeTheatre = escapeHtml(displayTheatre);
-  const safeBookingId = escapeHtml(bookingId);
-  const bookingUrl = `${CLIENT_URL}/bookings`;
-
-  const hasPoster = isValidHttpUrl(posterUrl);
-  const posterHtml = hasPoster
-    ? `<img src="${escapeHtml(posterUrl)}" alt="${safeMovie}" width="120" style="border-radius: 8px; border: 1px solid #334155; display: block; margin-bottom: 16px;">`
-    : '';
+  const displayAmount = totalAmount !== undefined
+    ? Number(totalAmount).toLocaleString('en-IN')
+    : (amount !== undefined ? Number(amount).toLocaleString('en-IN') : '0');
 
   const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Booking Confirmed - iMovies</title>
-</head>
-<body style="margin: 0; padding: 20px 10px; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f1f5f9;">
-  <center>
-    <table width="100%" style="max-width: 600px; background: #131926; border-radius: 14px; border: 1px solid #1f293d; overflow: hidden;">
-      <tr>
-        <td style="background: linear-gradient(135deg, #e50914 0%, #8b0000 100%); padding: 32px 24px; text-align: center;">
-          <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 800;">🎬 iMovies</h1>
-          <p style="margin: 8px 0 0; color: #ffe4e6; font-size: 15px;">Booking Confirmation Receipt</p>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding: 28px;">
-          <p style="margin: 0 0 16px; color: #cbd5e1; font-size: 15px;">
-            Hello <strong>${safeName}</strong>, your movie tickets are officially confirmed!
-          </p>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Booking Confirmation - iMovies</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #080c14; margin: 0; padding: 24px; color: #f8fafc; }
+        .wrapper { max-width: 600px; margin: 0 auto; background: #111726; border-radius: 16px; overflow: hidden; border: 1px solid #243048; box-shadow: 0 20px 40px rgba(0,0,0,0.7); }
+        .header { background: linear-gradient(135deg, #e50914 0%, #87060d 100%); padding: 36px 24px; text-align: center; }
+        .brand { font-size: 32px; font-weight: 800; color: #ffffff; margin: 0; }
+        .subbrand { color: #fecdd3; font-size: 14px; margin-top: 6px; font-weight: 500; }
+        .content { padding: 32px 28px; }
+        .ticket { background: #0a0e1a; border: 2px dashed #3a4763; border-radius: 12px; padding: 24px; margin-bottom: 24px; position: relative; }
+        .badge { display: inline-block; background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid #22c55e; font-size: 12px; font-weight: 700; text-transform: uppercase; padding: 4px 12px; border-radius: 20px; margin-bottom: 16px; }
+        .movie-title { margin: 0 0 18px; font-size: 24px; font-weight: 800; color: #ffffff; }
+        .table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+        .table td { padding: 10px 0; border-bottom: 1px solid #1e283d; vertical-align: top; }
+        .label { color: #8b9bb4; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; width: 40%; }
+        .val { color: #f8fafc; font-size: 15px; font-weight: 600; text-align: right; width: 60%; }
+        .seats-pill { background: #e50914; color: #ffffff; padding: 4px 12px; border-radius: 6px; display: inline-block; font-weight: 700; }
+        .total-val { color: #22c55e; font-size: 22px; font-weight: 800; }
+        .barcode-box { background: #131926; border-radius: 8px; padding: 16px; margin-top: 18px; border: 1px solid #253147; text-align: center; }
+        .barcode-label { color: #8b9bb4; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+        .booking-id { color: #38bdf8; font-family: 'Courier New', monospace; font-size: 18px; font-weight: 800; letter-spacing: 2px; margin: 6px 0; }
+        .instructions { background: rgba(229,9,20,0.08); border-left: 4px solid #e50914; padding: 14px 16px; border-radius: 4px; color: #cbd5e1; font-size: 13px; line-height: 1.5; margin-bottom: 24px; }
+        .footer { background: #090d16; padding: 24px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2336; }
+      </style>
+    </head>
+    <body>
+      <div class="wrapper">
+        <div class="header">
+          <div class="brand">🎬 iMovies Cinema Pass</div>
+          <div class="subbrand">Official Digital Ticket & Booking Receipt</div>
+        </div>
+        <div class="content">
+          <div class="ticket">
+            <span class="badge">● Confirmed & Verified</span>
+            <div class="movie-title">${displayMovie}</div>
 
-          <div style="background: #0d121d; border: 2px dashed #2b3952; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-            <table width="100%">
+            <table class="table">
               <tr>
-                <td style="color: #4ade80; font-weight: 700; font-size: 12px; text-transform: uppercase;">
-                  ● ${escapeHtml(paymentStatus)}
-                </td>
-                <td align="right" style="color: #38bdf8; font-family: monospace; font-size: 14px; font-weight: 700;">
-                  ID: ${safeBookingId}
-                </td>
+                <td class="label">Theatre</td>
+                <td class="val">${displayTheatre}</td>
+              </tr>
+              <tr>
+                <td class="label">Show Date</td>
+                <td class="val">${displayDate}</td>
+              </tr>
+              <tr>
+                <td class="label">Show Time</td>
+                <td class="val">${displayTime}</td>
+              </tr>
+              <tr>
+                <td class="label">Reserved Seats</td>
+                <td class="val"><span class="seats-pill">${displaySeats}</span></td>
+              </tr>
+              <tr>
+                <td class="label" style="font-weight: 700; color: #ffffff;">Amount Paid</td>
+                <td class="val total-val">₹${displayAmount}</td>
               </tr>
             </table>
 
-            <div style="margin: 16px 0; text-align: center;">
-              ${posterHtml}
-              <h2 style="margin: 0 0 6px; color: #ffffff; font-size: 22px;">${safeMovie}</h2>
-              <p style="margin: 0; color: #94a3b8; font-size: 14px;">${safeTheatre}${theatreLocation ? ` &bull; ${escapeHtml(theatreLocation)}` : ''}</p>
-              <p style="margin: 4px 0 0; color: #94a3b8; font-size: 13px;">${escapeHtml(screen)}</p>
+            <div class="barcode-box">
+              <div class="barcode-label">Booking Reference Number</div>
+              <div class="booking-id">${bookingId}</div>
+              <div class="barcode-label" style="margin-top: 4px;">Present this digital ticket at the cinema gate for direct entry</div>
             </div>
-
-            <table width="100%" style="border-top: 1px solid #1e293b; padding-top: 12px;">
-              <tr>
-                <td style="padding: 6px 0; color: #94a3b8; font-size: 13px;">Date & Time:</td>
-                <td align="right" style="padding: 6px 0; color: #ffffff; font-weight: 600; font-size: 13px;">${escapeHtml(displayDate)} at ${escapeHtml(displayTime)}</td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; color: #94a3b8; font-size: 13px;">Seats Reserved:</td>
-                <td align="right" style="padding: 6px 0; color: #ffffff; font-weight: 700; font-size: 14px;"><span style="background: #2563eb; color: #ffffff; padding: 2px 8px; border-radius: 4px;">${escapeHtml(seatStr)}</span></td>
-              </tr>
-              <tr>
-                <td style="padding: 6px 0; color: #94a3b8; font-size: 13px;">Transaction ID:</td>
-                <td align="right" style="padding: 6px 0; color: #cbd5e1; font-family: monospace; font-size: 12px;">${escapeHtml(paymentId)}</td>
-              </tr>
-              <tr style="border-top: 2px solid #334155;">
-                <td style="padding-top: 10px; color: #ffffff; font-weight: 700; font-size: 15px;">Total Amount Paid:</td>
-                <td align="right" style="padding-top: 10px; color: #22c55e; font-weight: 800; font-size: 18px;">₹${Number(total).toLocaleString('en-IN')}</td>
-              </tr>
-            </table>
           </div>
 
-          <div style="text-align: center; margin: 24px 0;">
-            <a href="${escapeHtml(bookingUrl)}" style="background: #e50914; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 14px; display: inline-block;">
-              View Digital Ticket
-            </a>
+          <div class="instructions">
+            📌 <strong>Entry Guidelines:</strong> Please arrive 15 minutes prior to showtime. You may present this digital ticket on your smartphone directly at the theatre scanner or counter.
           </div>
-
-          <p style="margin: 0; color: #94a3b8; font-size: 12px; line-height: 1.5; text-align: center;">
-            Please arrive at the theatre 15 minutes before showtime. Present this confirmation or your Booking ID at the entrance.
-          </p>
-        </td>
-      </tr>
-      <tr>
-        <td style="background: #0a0e17; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2334;">
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} iMovies Cinema Experience. All rights reserved.</p>
-        </td>
-      </tr>
-    </table>
-  </center>
-</body>
-</html>
+        </div>
+        <div class="footer">
+          <p>&copy; ${new Date().getFullYear()} iMovies Entertainment. Powered by Brevo Transactional Email.</p>
+        </div>
+      </div>
+    </body>
+    </html>
   `;
 
-  const textContent = `
-Your iMovies Ticket Booking is Confirmed!
-========================================
-
-Booking ID: ${bookingId}
-Movie:      ${displayMovie}
-Theatre:    ${displayTheatre}
-Screen:     ${screen}
-Date/Time:  ${displayDate} at ${displayTime}
-Seats:      ${seatStr}
-Total Paid: INR ${total}
-Payment ID: ${paymentId}
-
-View details & print ticket: ${bookingUrl}
-
-Please arrive 15 minutes before showtime.
-(c) ${new Date().getFullYear()} iMovies Inc.
-  `.trim();
-
-  return await sendEmail({
-    to: { email, name: customerName || email.split('@')[0] },
-    subject: `🍿 Your iMovies Ticket Booking is Confirmed! [${bookingId}]`,
+  return sendEmail({
+    to: userEmail,
+    subject: `🍿 Ticket Confirmed: ${displayMovie} [${bookingId}]`,
     htmlContent,
-    textContent,
-    tags: ['booking-confirmation', 'tickets']
+    textContent: `Your ticket for ${displayMovie} is confirmed! Booking ID: ${bookingId}, Seats: ${displaySeats}, Amount: ₹${displayAmount}.`,
+    tags: ['booking', 'confirmation']
   });
 };
 
 /**
- * 4. Booking Status Update Email (e.g. Confirmed, Modified, Cancelled, Refunded)
- *
- * @param {string} email - Recipient user email
- * @param {object} statusDetails - Status notification payload
+ * Wrapper: sendBookingStatusUpdateEmail
+ * Notifies customer of changes to their booking status (e.g. Refunded, Cancelled, Rescheduled)
  */
 const sendBookingStatusUpdateEmail = async (email, statusDetails = {}) => {
   const {
     bookingId = 'N/A',
-    movieTitle = 'Movie Experience',
+    movieName = 'Your Movie',
     status = 'Updated',
-    message = '',
-    theatreName = 'iMovies Cinema',
-    showDate = '',
-    showTime = '',
-    refundAmount = null,
-    refundId = null
+    refundAmount,
+    reason = 'Administrative update',
+    releasedSeats = []
   } = statusDetails;
 
-  const safeStatus = escapeHtml(status.toUpperCase());
-  const safeBookingId = escapeHtml(bookingId);
-  const safeMovie = escapeHtml(movieTitle);
-  const safeMsg = escapeHtml(message || `Your booking status has been updated to "${status}".`);
+  const isRefunded = String(status).toLowerCase().includes('refund');
+  const isCancelled = String(status).toLowerCase().includes('cancel');
 
-  let statusColor = '#3b82f6'; // blue default
-  if (status.toLowerCase().includes('cancel') || status.toLowerCase().includes('fail')) {
-    statusColor = '#ef4444'; // red
-  } else if (status.toLowerCase().includes('confirm') || status.toLowerCase().includes('complete')) {
-    statusColor = '#22c55e'; // green
-  } else if (status.toLowerCase().includes('refund')) {
-    statusColor = '#f59e0b'; // amber
-  }
+  const statusColor = isRefunded ? '#ef4444' : (isCancelled ? '#f59e0b' : '#3b82f6');
+  const seatsText = Array.isArray(releasedSeats) ? releasedSeats.join(', ') : String(releasedSeats || '');
 
   const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Booking Status Update - iMovies</title>
-</head>
-<body style="margin: 0; padding: 20px 10px; background-color: #0b0f19; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f1f5f9;">
-  <center>
-    <table width="100%" style="max-width: 600px; background: #131926; border-radius: 14px; border: 1px solid #1f293d; overflow: hidden;">
-      <tr>
-        <td style="background: #151c2a; border-bottom: 2px solid ${statusColor}; padding: 28px 24px; text-align: center;">
-          <h1 style="margin: 0; color: #e50914; font-size: 26px; font-weight: 800;">🎬 iMovies</h1>
-          <p style="margin: 6px 0 0; color: #94a3b8; font-size: 14px;">Booking Status Notification</p>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding: 32px 28px;">
-          <div style="display: inline-block; background: ${statusColor}22; border: 1px solid ${statusColor}; color: ${statusColor}; padding: 4px 12px; border-radius: 20px; font-weight: 700; font-size: 12px; margin-bottom: 16px;">
-            STATUS: ${safeStatus}
-          </div>
-          <h2 style="margin: 0 0 12px; color: #ffffff; font-size: 20px;">${safeMovie}</h2>
-          <p style="margin: 0 0 20px; color: #cbd5e1; font-size: 15px; line-height: 1.6;">
-            ${safeMsg}
-          </p>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <title>Booking Status Update - iMovies</title>
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #080c14; margin: 0; padding: 24px; color: #f8fafc; }
+        .wrapper { max-width: 580px; margin: 0 auto; background: #111726; border-radius: 16px; overflow: hidden; border: 1px solid #243048; }
+        .header { background: #1e293b; padding: 28px 24px; text-align: center; }
+        .brand { font-size: 28px; font-weight: 800; color: #ffffff; }
+        .body { padding: 32px 28px; }
+        .badge { display: inline-block; background: ${statusColor}22; color: ${statusColor}; border: 1px solid ${statusColor}; font-weight: 700; padding: 6px 14px; border-radius: 20px; font-size: 13px; text-transform: uppercase; margin-bottom: 16px; }
+        h2 { color: #ffffff; font-size: 20px; margin: 0 0 16px; }
+        p { color: #94a3b8; font-size: 15px; line-height: 1.6; margin: 0 0 16px; }
+        .info-card { background: #0a0e1a; border-radius: 10px; padding: 18px; border: 1px solid #233048; margin: 20px 0; }
+        .footer { background: #090d16; padding: 20px; text-align: center; color: #64748b; font-size: 12px; }
+      </style>
+    </head>
+    <body>
+      <div class="wrapper">
+        <div class="header">
+          <div class="brand">🎬 iMovies Update</div>
+        </div>
+        <div class="body">
+          <span class="badge">Status: ${status}</span>
+          <h2>Update on Booking #${bookingId}</h2>
+          <p>This is an automated notification regarding your ticket reservation for <strong>${movieName}</strong>.</p>
 
-          <div style="background: #0d121d; border-radius: 8px; padding: 16px; margin-bottom: 24px; border: 1px solid #232e42;">
-            <table width="100%">
-              <tr>
-                <td style="color: #94a3b8; font-size: 13px; padding: 4px 0;">Booking ID:</td>
-                <td align="right" style="color: #38bdf8; font-family: monospace; font-size: 13px; font-weight: 700;">${safeBookingId}</td>
-              </tr>
-              ${theatreName ? `
-              <tr>
-                <td style="color: #94a3b8; font-size: 13px; padding: 4px 0;">Theatre:</td>
-                <td align="right" style="color: #ffffff; font-size: 13px;">${escapeHtml(theatreName)}</td>
-              </tr>` : ''}
-              ${showDate ? `
-              <tr>
-                <td style="color: #94a3b8; font-size: 13px; padding: 4px 0;">Showtime:</td>
-                <td align="right" style="color: #ffffff; font-size: 13px;">${escapeHtml(showDate)} ${showTime ? 'at ' + escapeHtml(showTime) : ''}</td>
-              </tr>` : ''}
-              ${refundAmount !== null ? `
-              <tr>
-                <td style="color: #94a3b8; font-size: 13px; padding: 4px 0;">Refund Amount:</td>
-                <td align="right" style="color: #22c55e; font-weight: 700; font-size: 14px;">₹${Number(refundAmount).toLocaleString('en-IN')}</td>
-              </tr>` : ''}
-              ${refundId ? `
-              <tr>
-                <td style="color: #94a3b8; font-size: 13px; padding: 4px 0;">Refund ID:</td>
-                <td align="right" style="color: #cbd5e1; font-family: monospace; font-size: 12px;">${escapeHtml(refundId)}</td>
-              </tr>` : ''}
-            </table>
+          <div class="info-card">
+            <p style="margin: 4px 0;"><strong>Booking Reference:</strong> ${bookingId}</p>
+            ${refundAmount ? `<p style="margin: 4px 0; color: #22c55e;"><strong>Refund Amount:</strong> ₹${Number(refundAmount).toLocaleString('en-IN')}</p>` : ''}
+            ${seatsText ? `<p style="margin: 4px 0;"><strong>Seats Released:</strong> ${seatsText}</p>` : ''}
+            <p style="margin: 4px 0;"><strong>Reason / Note:</strong> ${reason}</p>
           </div>
 
-          <div style="text-align: center; margin: 24px 0;">
-            <a href="${CLIENT_URL}/bookings" style="background: #e50914; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 14px; display: inline-block;">
-              View My Bookings
-            </a>
-          </div>
-        </td>
-      </tr>
-      <tr>
-        <td style="background: #0a0e17; padding: 20px; text-align: center; color: #64748b; font-size: 12px; border-top: 1px solid #1a2334;">
-          <p style="margin: 0;">&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
-        </td>
-      </tr>
-    </table>
-  </center>
-</body>
-</html>
+          <p>If you have any questions about this update or need assistance, our support team is available 24/7.</p>
+        </div>
+        <div class="footer">
+          <p>&copy; ${new Date().getFullYear()} iMovies. All rights reserved.</p>
+        </div>
+      </div>
+    </body>
+    </html>
   `;
 
-  const textContent = `
-iMovies Booking Status Update: ${status}
-========================================
-
-Booking ID: ${bookingId}
-Movie:      ${movieTitle}
-Status:     ${status}
-
-${message || `Your booking status has been updated to "${status}".`}
-
-${refundAmount ? `Refund Amount: INR ${refundAmount}\n` : ''}${refundId ? `Refund Reference: ${refundId}\n` : ''}
-View your bookings: ${CLIENT_URL}/bookings
-
-(c) ${new Date().getFullYear()} iMovies Inc.
-  `.trim();
-
-  return await sendEmail({
-    to: { email, name: email.split('@')[0] },
-    subject: `🔔 Booking Update: ${movieTitle} [${status}]`,
+  return sendEmail({
+    to: email,
+    subject: `🔔 Booking Update: ${movieName} [${status}]`,
     htmlContent,
-    textContent,
-    tags: ['booking-status', 'update']
+    textContent: `Your booking #${bookingId} for ${movieName} has been marked as ${status}.`,
+    tags: ['booking', 'status-update']
   });
-};
-
-/**
- * Backward compatibility wrapper for legacy callers
- */
-const sendTicketEmail = async (userEmail, ticketDetails = {}) => {
-  if (ticketDetails && ticketDetails.bookingId) {
-    return await sendBookingConfirmationEmail(ticketDetails.bookingId);
-  }
-  return await sendBookingConfirmationEmail(userEmail, ticketDetails);
 };
 
 module.exports = {
@@ -924,8 +539,6 @@ module.exports = {
   sendVerificationEmail,
   sendPasswordResetEmail,
   sendBookingConfirmationEmail,
-  sendBookingStatusUpdateEmail,
-  sendTicketEmail,
-  escapeHtml,
-  isValidHttpUrl
+  sendTicketEmail: sendBookingConfirmationEmail, // Backwards compatible alias
+  sendBookingStatusUpdateEmail
 };

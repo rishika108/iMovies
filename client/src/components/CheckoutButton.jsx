@@ -133,9 +133,6 @@ export default function CheckoutButton({
 
             if (verifyRes.data && verifyRes.data.success) {
               toast.success('🎉 Payment Verified! Your movie tickets are confirmed.');
-              if (verifyRes.data.emailNotification?.status === 'sent') {
-                toast.info('📧 Confirmation email sent to your inbox.');
-              }
               if (onPaymentSuccess) {
                 onPaymentSuccess(verifyRes.data.booking);
               }

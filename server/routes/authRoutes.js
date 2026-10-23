@@ -2,16 +2,18 @@ const express = require('express');
 const router = express.Router();
 const {
   registerUser,
-  verifyEmail,
-  resendVerification,
-  requestPasswordReset,
-  resetPassword,
   loginUser,
   validateUserToken,
   registerAdmin,
   loginAdmin,
   validateAdminToken,
-  changePassword
+  changePassword,
+  verifyOtp,
+  verifyEmailToken,
+  resendVerificationOtp,
+  forgotPassword,
+  verifyResetOtp,
+  resetPassword
 } = require('../controllers/authController');
 const fetchUser = require('../middlewares/fetchUser');
 const fetchAdmin = require('../middlewares/fetchAdmin');
@@ -24,14 +26,15 @@ router.post('/signin', loginUser);
 router.get('/validate', fetchUser, validateUserToken);
 router.put('/change-password', fetchUser, changePassword);
 
-// Email Verification routes
-router.get('/verify-email', verifyEmail);
-router.post('/verify-email', verifyEmail);
-router.post('/resend-verification', resendVerification);
+// Email Verification & OTP Routes
+router.post('/verify-otp', verifyOtp);
+router.post('/verify-email', verifyEmailToken);
+router.get('/verify-email', verifyEmailToken);
+router.post('/resend-otp', resendVerificationOtp);
 
-// Password Reset routes
-router.post('/forgot-password', requestPasswordReset);
-router.post('/request-password-reset', requestPasswordReset);
+// Forgot Password & Reset Routes
+router.post('/forgot-password', forgotPassword);
+router.post('/verify-reset-otp', verifyResetOtp);
 router.post('/reset-password', resetPassword);
 
 // Admin Authentication routes (Registration protected — only authenticated admins can create admins)
