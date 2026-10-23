@@ -6,14 +6,27 @@
 const { BrevoClient } = require('@getbrevo/brevo');
 const emailConfig = require('../config/emailConfig');
 
-// Initialize Brevo Client
+// Initialize Brevo Client only when API key is present
 let brevoClient = null;
-try {
-  brevoClient = new BrevoClient({ apiKey: emailConfig.BREVO_API_KEY });
-  console.log('[emailService] Brevo Transactional Email client initialized.');
-} catch (err) {
-  console.error('[emailService Error] Failed to initialize Brevo client:', err.message);
+if (emailConfig.isConfigured && emailConfig.BREVO_API_KEY) {
+  try {
+    brevoClient = new BrevoClient({ apiKey: emailConfig.BREVO_API_KEY });
+    console.log('[emailService] ✅ Brevo Transactional Email client initialized.');
+  } catch (err) {
+    console.warn('[emailService] ⚠️  Failed to initialize Brevo client:', err.message);
+  }
+} else {
+  console.warn('[emailService] ⚠️  Brevo client not initialized — BREVO_API_KEY missing. Email sending is disabled.');
 }
+
+/**
+ * No-op stub returned when email service is not configured.
+ * Logs a warning but does NOT throw — application continues safely.
+ */
+const emailDisabledResult = (context) => {
+  console.warn(`[emailService] ⚠️  Email skipped (${context}): BREVO_API_KEY not configured.`);
+  return { success: false, error: 'Email service not configured. Set BREVO_API_KEY in your environment.' };
+};
 
 /**
  * Helper to normalize recipients into array of { email, name }
@@ -78,8 +91,7 @@ const sendEmail = async ({
   }
 
   if (!brevoClient) {
-    console.error('[emailService] sendEmail aborted: Brevo client is not initialized.');
-    return { success: false, error: 'Email service unavailable' };
+    return emailDisabledResult(`sendEmail to ${Array.isArray(to) ? to[0]?.email || to[0] : to}`);
   }
 
   // Construct payload strictly conforming to Brevo v6 API requirements
@@ -139,6 +151,10 @@ const sendTemplateEmail = async ({ to, templateId, params = {}, tags = ['templat
   const recipients = normalizeRecipients(to);
   if (recipients.length === 0 || !templateId) {
     return { success: false, error: 'Recipient and templateId are required' };
+  }
+
+  if (!brevoClient) {
+    return emailDisabledResult(`sendTemplateEmail #${templateId}`);
   }
 
   try {
