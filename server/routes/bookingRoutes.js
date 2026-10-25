@@ -6,10 +6,15 @@ const {
   confirmPayment,
   cancelBooking,
   getUserBookings,
-  getAllBookings
+  getAllBookings,
+  getPublicTicket
 } = require('../controllers/bookingController');
 const fetchUser = require('../middlewares/fetchUser');
 const fetchAdmin = require('../middlewares/fetchAdmin');
+
+// Public sharable ticket endpoints (unauthenticated)
+router.get('/public/:bookingId', getPublicTicket);
+router.get('/ticket/:bookingId', getPublicTicket);
 
 // Seat locking & Booking creation
 router.post('/lock', fetchUser, lockSeats);

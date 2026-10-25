@@ -5,6 +5,7 @@ import Header from '../components/Header';
 import Footer from '../components/Footer';
 import Loader from '../components/Loader';
 import API from '../utils/api';
+import { isShowExpired } from '../utils/timeHelper';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faFilm,
@@ -13,7 +14,8 @@ import {
   faTicket,
   faClock,
   faTag,
-  faArrowLeft
+  faArrowLeft,
+  faBan
 } from '@fortawesome/free-solid-svg-icons';
 
 export default function MovieShows() {
@@ -241,27 +243,49 @@ export default function MovieShows() {
 
                 {/* Showtimes Buttons Grid */}
                 <div className="d-flex flex-wrap gap-3">
-                  {theatreGroup.shows.map((show) => (
-                    <button
-                      key={show.showId}
-                      type="button"
-                      onClick={() => navigate(`/seatslug/${show.showId}`)}
-                      className="btn btn-outline-light px-4 py-2 rounded-3 text-start transition-all hover-scale d-flex flex-column align-items-center"
-                      style={{
-                        backgroundColor: '#0d111b',
-                        borderColor: '#2e374f',
-                        minWidth: '130px'
-                      }}
-                    >
-                      <span className="fw-bold text-white fs-6 mb-1">
-                        <FontAwesomeIcon icon={faClock} className="me-1 text-danger small" />
-                        {show.showTime}
-                      </span>
-                      <span className="badge bg-secondary bg-opacity-50 text-light px-2 py-1" style={{ fontSize: '0.75rem' }}>
-                        Book Seats
-                      </span>
-                    </button>
-                  ))}
+                  {theatreGroup.shows.map((show) => {
+                    const expired = show.isExpired !== undefined
+                      ? show.isExpired
+                      : isShowExpired(show.showDate, show.showTime);
+
+                    return (
+                      <button
+                        key={show.showId}
+                        type="button"
+                        onClick={() => {
+                          if (!expired) navigate(`/seatslug/${show.showId}`);
+                        }}
+                        disabled={expired}
+                        className={`btn px-4 py-2 rounded-3 text-start transition-all d-flex flex-column align-items-center ${
+                          expired
+                            ? 'btn-outline-secondary opacity-50'
+                            : 'btn-outline-light hover-scale'
+                        }`}
+                        style={{
+                          backgroundColor: expired ? '#10131c' : '#0d111b',
+                          borderColor: expired ? '#22283a' : '#2e374f',
+                          minWidth: '135px',
+                          cursor: expired ? 'not-allowed' : 'pointer'
+                        }}
+                        title={expired ? 'This showtime has already passed' : `Book for ${show.showTime}`}
+                      >
+                        <span className={`fw-bold fs-6 mb-1 ${expired ? 'text-secondary text-decoration-line-through' : 'text-white'}`}>
+                          <FontAwesomeIcon icon={faClock} className={`me-1 small ${expired ? 'text-secondary' : 'text-danger'}`} />
+                          {show.showTime}
+                        </span>
+                        {expired ? (
+                          <span className="badge bg-danger bg-opacity-20 text-danger border border-danger border-opacity-25 px-2 py-1" style={{ fontSize: '0.7rem' }}>
+                            <FontAwesomeIcon icon={faBan} className="me-1" />
+                            Passed
+                          </span>
+                        ) : (
+                          <span className="badge bg-success bg-opacity-20 text-success border border-success border-opacity-25 px-2 py-1" style={{ fontSize: '0.75rem' }}>
+                            Book Seats
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             ))}

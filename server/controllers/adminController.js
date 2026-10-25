@@ -42,15 +42,54 @@ const getDashboardStats = async (req, res) => {
 
 /**
  * Get all registered users (excluding password hashes)
+ * Enriched with total bookings and total spent per user
  */
 const getAllUsers = async (req, res) => {
   try {
     const users = await User.find({}).select('-password').sort({ createdAt: -1 });
 
+    // Aggregate booking counts and revenue per user email
+    const userEmails = users.map((u) => (u.email || '').toLowerCase()).filter(Boolean);
+    const bookingsCountMap = {};
+
+    const bookingAgg = await Booking.aggregate([
+      { $match: { userEmail: { $in: userEmails } } },
+      {
+        $group: {
+          _id: { $toLower: '$userEmail' },
+          count: { $sum: 1 },
+          totalSpent: { $sum: '$totalAmount' }
+        }
+      }
+    ]);
+
+    bookingAgg.forEach((item) => {
+      bookingsCountMap[item._id] = {
+        count: item.count,
+        totalSpent: item.totalSpent
+      };
+    });
+
+    const enrichedUsers = users.map((u) => {
+      const emailKey = (u.email || '').toLowerCase();
+      const stats = bookingsCountMap[emailKey] || { count: 0, totalSpent: 0 };
+      return {
+        _id: u._id,
+        id: u._id,
+        username: u.username,
+        email: u.email,
+        role: u.role || 'user',
+        isVerified: u.isVerified,
+        createdAt: u.createdAt,
+        totalBookings: stats.count,
+        totalSpent: stats.totalSpent
+      };
+    });
+
     return res.status(200).json({
       success: true,
-      count: users.length,
-      users
+      count: enrichedUsers.length,
+      users: enrichedUsers
     });
   } catch (error) {
     console.error('Error in getAllUsers:', error);
@@ -62,28 +101,54 @@ const getAllUsers = async (req, res) => {
 };
 
 /**
- * Delete a user by _id
+ * Delete a user by _id or userId
+ * Enforces admin authorization, protects administrative accounts and self-deletion
  */
 const deleteUser = async (req, res) => {
   try {
-    const { id } = req.params;
+    const targetId = req.params.userId || req.params.id;
 
-    const deletedUser = await User.findByIdAndDelete(id);
+    if (!targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID is required'
+      });
+    }
 
-    if (!deletedUser) {
+    const user = await User.findById(targetId);
+
+    if (!user) {
       return res.status(404).json({
         success: false,
         error: 'User not found'
       });
     }
 
+    // Security check: Prevent deleting admin role accounts via user endpoint
+    if (user.role === 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Action denied: Administrator accounts cannot be deleted via the user management panel.'
+      });
+    }
+
+    // Security check: Prevent self-deletion if current admin matches user id
+    if (req.user && req.user.id && req.user.id.toString() === targetId.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'Action denied: You cannot delete your currently active administrative account.'
+      });
+    }
+
+    await User.findByIdAndDelete(targetId);
+
     return res.status(200).json({
       success: true,
-      message: 'User deleted successfully',
+      message: `User account (${user.email}) deleted successfully`,
       user: {
-        id: deletedUser._id,
-        email: deletedUser.email,
-        username: deletedUser.username
+        id: user._id,
+        email: user.email,
+        username: user.username
       }
     });
   } catch (error) {

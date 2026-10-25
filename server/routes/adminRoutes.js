@@ -13,7 +13,8 @@ const fetchAdmin = require('../middlewares/fetchAdmin');
 // All admin dashboard management routes protected by fetchAdmin
 router.get('/stats', fetchAdmin, getDashboardStats);
 router.get('/users', fetchAdmin, getAllUsers);
-router.delete('/users/:id', fetchAdmin, deleteUser);
+router.delete('/users/:userId', fetchAdmin, deleteUser);
+router.delete('/users/id/:id', fetchAdmin, deleteUser);
 
 // Admin transactions and refund management
 router.get('/transactions', fetchAdmin, getAllTransactions);

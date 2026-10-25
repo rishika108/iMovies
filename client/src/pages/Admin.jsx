@@ -144,6 +144,7 @@ export default function Admin() {
 
   const navLinks = [
     { name: 'Dashboard', path: '/admin', icon: faGaugeHigh },
+    { name: 'Users', path: '/admin/users', icon: faUsers },
     { name: 'Movies', path: '/addmovie', icon: faFilm },
     { name: 'Theatres', path: '/addtheatre', icon: faBuilding },
     { name: 'Shows', path: '/addshow', icon: faCalendarDays },
@@ -292,12 +293,16 @@ export default function Admin() {
                 />
               </div>
               <div className="col-12 col-sm-6 col-xl-4">
-                <StatsCard
-                  title="Total Users"
-                  value={stats.totalUsers}
-                  icon={faUsers}
-                  color="#9b59b6"
-                />
+                <Link to="/admin/users" style={{ textDecoration: 'none' }} title="Click to view & manage registered users">
+                  <div className="hover-scale" style={{ cursor: 'pointer' }}>
+                    <StatsCard
+                      title="Total Users (Manage)"
+                      value={stats.totalUsers}
+                      icon={faUsers}
+                      color="#9b59b6"
+                    />
+                  </div>
+                </Link>
               </div>
               <div className="col-12 col-sm-6 col-xl-4">
                 <StatsCard

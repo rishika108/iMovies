@@ -6,6 +6,7 @@ import Header from '../components/Header';
 import Footer from '../components/Footer';
 import Loader from '../components/Loader';
 import API from '../utils/api';
+import { isShowExpired } from '../utils/timeHelper';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faTv,
@@ -18,7 +19,8 @@ import {
   faShieldHalved,
   faArrowLeft,
   faCreditCard,
-  faQrcode
+  faQrcode,
+  faBan
 } from '@fortawesome/free-solid-svg-icons';
 
 const BALCONY_ROWS = ['A', 'B', 'C'];
@@ -199,6 +201,11 @@ export default function SeatSlug() {
 
   // Seat Click Handler
   const handleSeatClick = (seatId, tier) => {
+    if (show && isShowExpired(show.showDate, show.showTime)) {
+      toast.error('This show has already passed. Seat selection is disabled.');
+      return;
+    }
+
     if (isLocked) {
       toast.info('Seats are already locked. Proceed to Confirm Booking or wait for expiry.');
       return;
@@ -274,6 +281,11 @@ export default function SeatSlug() {
 
   // Lock Seats Handler
   const handleLockSeats = async () => {
+    if (show && isShowExpired(show.showDate, show.showTime)) {
+      toast.error('This showtime has already passed and cannot be booked.');
+      return;
+    }
+
     if (!userToken) {
       toast.info('Please log in to proceed with booking');
       navigate('/login');
@@ -336,6 +348,11 @@ export default function SeatSlug() {
   // Step 4: Checkout Modal & Verification - window.Razorpay -> POST /api/payment/verify
   // Step 5: Confirmation & Notification - Redirect to /bookings with ticket generated
   const handleConfirmBooking = async () => {
+    if (show && isShowExpired(show.showDate, show.showTime)) {
+      toast.error('This showtime has already passed and cannot be booked.');
+      return;
+    }
+
     if (!userToken) {
       toast.info('Please log in to confirm booking');
       navigate('/login');
@@ -569,26 +586,23 @@ export default function SeatSlug() {
           )}
         </div>
 
+        {/* Showtime Expired Warning */}
+        {show && isShowExpired(show.showDate, show.showTime) && (
+          <div className="alert alert-danger d-flex align-items-center gap-3 mb-4 rounded-3 border-danger shadow-sm">
+            <FontAwesomeIcon icon={faBan} className="fs-4 text-danger" />
+            <div>
+              <div className="fw-bold">Showtime Expired</div>
+              <div className="small">
+                This show ({show.showDate} at {show.showTime}) has already commenced or passed. Seat selection and ticket booking are disabled.
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="row g-4">
           {/* Left / Center: Interactive Seat Layout */}
           <div className="col-12 col-xl-8">
             <div className="dark-card p-4 text-center overflow-auto shadow-sm" style={{ border: '1px solid #23293b' }}>
-              {/* Screen Representation */}
-              <div className="mb-4" style={{ perspective: '300px' }}>
-                <div
-                  className="screen-curved mx-auto"
-                  style={{
-                    maxWidth: '560px',
-                    height: '10px',
-                    transform: 'rotateX(-20deg)',
-                    boxShadow: '0 10px 25px rgba(229, 9, 20, 0.45)'
-                  }}
-                ></div>
-                <div className="text-secondary fw-semibold small mt-2 letter-spacing" style={{ letterSpacing: '4px' }}>
-                  --- CINEMA SCREEN ---
-                </div>
-              </div>
-
               {/* TIER 1: BALCONY */}
               <div className="mb-4">
                 <div className="d-flex justify-content-between align-items-center mb-2 px-3">
@@ -659,13 +673,13 @@ export default function SeatSlug() {
                 </div>
               </div>
 
-              {/* TIER 3: LOWER */}
-              <div className="mb-4">
+              {/* TIER 3: LOWER (Lowest-priced / Budget Friendly - Screen is adjacent to this tier) */}
+              <div className="mb-3">
                 <div className="d-flex justify-content-between align-items-center mb-2 px-3">
                   <span className="badge bg-secondary bg-opacity-25 text-light border border-secondary fw-semibold px-2 py-1">
                     LOWER TIER (₹150)
                   </span>
-                  <span className="text-secondary small">Budget Friendly</span>
+                  <span className="text-secondary small">Lowest Priced Tier (Front Rows)</span>
                 </div>
                 <div className="d-inline-block">
                   {LOWER_ROWS.map((row) => (
@@ -691,6 +705,41 @@ export default function SeatSlug() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+
+              {/* Visual Screen Indicator directly adjacent to the Lowest-Priced (Lower) Tier */}
+              <div
+                className="mt-4 pt-3 pb-3 text-center position-relative"
+                role="region"
+                aria-label="Cinema screen position: all eyes this way, facing lowest priced lower tier front seats"
+              >
+                <div
+                  className="d-flex align-items-center justify-content-center gap-2 mb-2 text-danger fw-bold small text-uppercase"
+                  style={{ letterSpacing: '4px' }}
+                >
+                  <span aria-hidden="true" style={{ fontSize: '0.9rem' }}>▲</span>
+                  <span>SCREEN / SCREEN THIS WAY</span>
+                  <span aria-hidden="true" style={{ fontSize: '0.9rem' }}>▲</span>
+                </div>
+                <div style={{ perspective: '300px' }} className="d-flex justify-content-center">
+                  <div
+                    className="screen-curved"
+                    style={{
+                      width: '85%',
+                      maxWidth: '640px',
+                      height: '14px',
+                      background: 'linear-gradient(180deg, #ffffff 0%, rgba(229, 9, 20, 0.85) 55%, transparent 100%)',
+                      borderRadius: '50% 50% 0 0 / 100% 100% 0 0',
+                      boxShadow: '0 -8px 25px rgba(229, 9, 20, 0.5), 0 -2px 10px rgba(255, 255, 255, 0.8)'
+                    }}
+                  ></div>
+                </div>
+                <div className="text-secondary fw-bold small mt-2" style={{ letterSpacing: '3px', fontSize: '0.8rem' }}>
+                  🎬 ALL EYES THIS WAY — CINEMA SCREEN
+                </div>
+                <div className="text-secondary small opacity-75 mt-1" style={{ fontSize: '0.72rem' }}>
+                  Positioned directly in front of Lower Tier (₹150 budget seats)
                 </div>
               </div>
 
@@ -803,7 +852,7 @@ export default function SeatSlug() {
                   type="button"
                   className="btn btn-primary-blue w-100 py-2 fw-bold"
                   onClick={handleLockSeats}
-                  disabled={selectedSeats.length === 0 || isLocked || lockingInProgress}
+                  disabled={selectedSeats.length === 0 || isLocked || lockingInProgress || (show && isShowExpired(show.showDate, show.showTime))}
                 >
                   {lockingInProgress ? (
                     'Locking Seats...'
@@ -822,7 +871,7 @@ export default function SeatSlug() {
                   type="button"
                   className="btn btn-primary-red w-100 py-2 fw-bold d-flex align-items-center justify-content-center gap-2 shadow"
                   onClick={handleConfirmBooking}
-                  disabled={!isLocked || bookingInProgress}
+                  disabled={!isLocked || bookingInProgress || (show && isShowExpired(show.showDate, show.showTime))}
                   style={{ fontSize: '0.95rem' }}
                 >
                   {bookingInProgress ? (

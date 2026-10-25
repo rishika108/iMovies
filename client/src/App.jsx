@@ -24,6 +24,8 @@ const AddShow = lazy(() => import('./pages/AddShow'));
 const AddAdmin = lazy(() => import('./pages/AddAdmin'));
 const AdminBookings = lazy(() => import('./pages/AdminBookings'));
 const AdminTransactions = lazy(() => import('./pages/AdminTransactions'));
+const AdminUsers = lazy(() => import('./pages/AdminUsers'));
+const PublicTicketView = lazy(() => import('./pages/PublicTicketView'));
 const VerifyEmail = lazy(() => import('./pages/VerifyEmail'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 
@@ -40,6 +42,9 @@ export default function App() {
             <Route path="/register" element={<Register />} />
             <Route path="/verify-email" element={<VerifyEmail />} />
             <Route path="/reset-password" element={<ResetPassword />} />
+            {/* Sharable Public Unauthenticated Ticket Views */}
+            <Route path="/tickets/view/:bookingId" element={<PublicTicketView />} />
+            <Route path="/shared-ticket/:bookingId" element={<PublicTicketView />} />
             {/* User Protected Routes */}
             <Route
               path="/home"
@@ -103,6 +108,14 @@ export default function App() {
               element={
                 <AdminProtection>
                   <Admin />
+                </AdminProtection>
+              }
+            />
+            <Route
+              path="/admin/users"
+              element={
+                <AdminProtection>
+                  <AdminUsers />
                 </AdminProtection>
               }
             />

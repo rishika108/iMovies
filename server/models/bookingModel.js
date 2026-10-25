@@ -26,6 +26,11 @@ const bookingSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  posterUrl: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   theatreName: {
     type: String,
     trim: true
