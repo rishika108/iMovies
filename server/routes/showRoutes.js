@@ -4,6 +4,7 @@ const {
   getAllShows,
   getShowById,
   getShowsByMovie,
+  refreshShowsForMovie,
   addShow,
   updateShow,
   deleteShow
@@ -13,6 +14,8 @@ const fetchAdmin = require('../middlewares/fetchAdmin');
 // Query routes (specific subpath /movie/:movieId before /:showId)
 router.get('/', getAllShows);
 router.get('/movie/:movieId', getShowsByMovie);
+router.get('/refresh/:movieId', refreshShowsForMovie);
+router.post('/refresh/:movieId', refreshShowsForMovie);
 router.get('/:showId', getShowById);
 
 // Admin-protected show management routes

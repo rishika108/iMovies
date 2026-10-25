@@ -16,8 +16,10 @@ import {
   faBan,
   faBuilding,
   faFilter,
-  faCheck
+  faCheck,
+  faRotateRight
 } from '@fortawesome/free-solid-svg-icons';
+import { toast } from 'react-toastify';
 
 export default function MovieShows() {
   const { movieId } = useParams();
@@ -26,43 +28,76 @@ export default function MovieShows() {
   const [movie, setMovie] = useState(null);
   const [shows, setShows] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Generate next 7 dates
   const next7Days = Array.from({ length: 7 }, (_, i) => dayjs().add(i, 'day'));
   const [selectedDate, setSelectedDate] = useState(next7Days[0].format('YYYY-MM-DD'));
   const [selectedTheatreId, setSelectedTheatreId] = useState('all');
 
-  useEffect(() => {
-    const fetchMovieAndShows = async () => {
-      setLoading(true);
+  const fetchMovieAndShows = async () => {
+    setLoading(true);
+    try {
+      // 1. Fetch Movie Details
       try {
-        // 1. Fetch Movie Details
-        try {
-          const isTmdb = movieId?.startsWith('tmdb_');
-          const tmdbId = isTmdb ? movieId.replace('tmdb_', '') : null;
-          const movieRes = isTmdb
-            ? await API.get(`/movies/tmdb/${tmdbId}`)
-            : await API.get(`/movies/${movieId}`);
-          setMovie(movieRes.data?.movie || movieRes.data);
-        } catch (movieErr) {
-          console.warn('Movie details fetch warning:', movieErr);
-        }
-
-        // 2. Fetch Shows for this movie (supports multi-theater varied schedules)
-        const showsRes = await API.get(`/shows/movie/${movieId}`);
-        const showData = showsRes.data?.shows || (Array.isArray(showsRes.data) ? showsRes.data : []);
-        setShows(showData);
-      } catch (err) {
-        console.error('Error fetching shows for movie:', err);
-      } finally {
-        setLoading(false);
+        const isTmdb = movieId?.startsWith('tmdb_');
+        const tmdbId = isTmdb ? movieId.replace('tmdb_', '') : null;
+        const movieRes = isTmdb
+          ? await API.get(`/movies/tmdb/${tmdbId}`)
+          : await API.get(`/movies/${movieId}`);
+        setMovie(movieRes.data?.movie || movieRes.data);
+      } catch (movieErr) {
+        console.warn('Movie details fetch warning:', movieErr);
       }
-    };
 
+      // 2. Fetch Shows for this movie (supports multi-theater varied schedules)
+      const showsRes = await API.get(`/shows/movie/${movieId}`);
+      let showData = showsRes.data?.shows || (Array.isArray(showsRes.data) ? showsRes.data : []);
+
+      // If returned shows are fewer than 12 (e.g. old 2-show legacy data in DB), automatically expand
+      if (showData.length < 12) {
+        try {
+          const refreshRes = await API.post(`/shows/refresh/${movieId}`);
+          if (refreshRes.data?.shows && refreshRes.data.shows.length > showData.length) {
+            showData = refreshRes.data.shows;
+          }
+        } catch (rErr) {
+          // non-blocking
+        }
+      }
+
+      setShows(showData);
+    } catch (err) {
+      console.error('Error fetching shows for movie:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
     if (movieId) {
       fetchMovieAndShows();
     }
   }, [movieId]);
+
+  const handleRefreshShowtimes = async () => {
+    setRefreshing(true);
+    try {
+      const res = await API.post(`/shows/refresh/${movieId}`);
+      const freshShows = res.data?.shows || [];
+      if (freshShows.length > 0) {
+        setShows(freshShows);
+        toast.success(`Expanded showtimes: 6 shows per theater loaded!`);
+      } else {
+        await fetchMovieAndShows();
+      }
+    } catch (err) {
+      console.error('Failed to refresh showtimes:', err);
+      toast.error('Unable to refresh showtimes');
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   // Filter shows by selected date
   const dateFilteredShows = useMemo(() => {
@@ -186,9 +221,18 @@ export default function MovieShows() {
               )}
             </div>
 
-            {/* Pricing Legend */}
+            {/* Actions & Pricing Legend */}
             <div className="d-flex flex-wrap gap-2 align-items-center">
-              <span className="small text-secondary fw-semibold me-1">Tiers:</span>
+              <button
+                type="button"
+                onClick={handleRefreshShowtimes}
+                disabled={refreshing}
+                className="btn btn-sm btn-outline-danger px-3 rounded-pill d-inline-flex align-items-center gap-2 fw-semibold"
+                title="Expand and refresh full 6 daily showtimes for each theater"
+              >
+                <FontAwesomeIcon icon={faRotateRight} className={refreshing ? 'fa-spin' : ''} />
+                <span>{refreshing ? 'Loading 6 Shows...' : 'Refresh Showtimes (6/day)'}</span>
+              </button>
               <span className="badge bg-dark border border-secondary px-2 py-1 text-light">
                 Balcony: ₹300-₹400
               </span>

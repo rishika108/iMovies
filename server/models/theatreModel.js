@@ -70,7 +70,7 @@ const theatreSchema = new mongoose.Schema({
   },
   showtimes: {
     type: [String],
-    default: ['10:00 AM', '01:30 PM', '05:00 PM', '08:30 PM']
+    default: ['09:15 AM', '11:45 AM', '02:30 PM', '05:15 PM', '08:00 PM', '10:45 PM']
   },
   screenName: {
     type: String,

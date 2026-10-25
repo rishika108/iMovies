@@ -88,6 +88,15 @@ const addTheatre = async (req, res) => {
       balconySeatPrice: balconySeatPrice !== undefined ? Number(balconySeatPrice) : 300,
       middleSeatPrice: middleSeatPrice !== undefined ? Number(middleSeatPrice) : 200,
       lowerSeatPrice: lowerSeatPrice !== undefined ? Number(lowerSeatPrice) : 150,
+      showtimes:
+        req.body.showtimes && Array.isArray(req.body.showtimes) && req.body.showtimes.length > 0
+          ? req.body.showtimes
+          : ['09:15 AM', '11:45 AM', '02:30 PM', '05:15 PM', '08:00 PM', '10:45 PM'],
+      screenName: (req.body.screenName || 'Audi 1').trim(),
+      facilities:
+        req.body.facilities && Array.isArray(req.body.facilities) && req.body.facilities.length > 0
+          ? req.body.facilities
+          : ['4K Laser Projection', 'Dolby 7.1 Surround', 'Recliner Seating Available'],
       balconySeats: balconySeats || { rows: 3, cols: 10 },
       middleSeats: middleSeats || { rows: 5, cols: 12 },
       lowerSeats: lowerSeats || { rows: 7, cols: 14 }

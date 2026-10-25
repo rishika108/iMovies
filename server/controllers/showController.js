@@ -19,11 +19,8 @@ const getRowLabel = (index) => {
 
 /**
  * Distinct schedules for multi-theatre showtime expansion.
- * Each theatre has 4-5 unique, non-overlapping showtimes per day.
- * e.g., Theatre A has shows at 10:00 AM, 1:30 PM, 5:00 PM, 8:30 PM, 11:15 PM;
- *       Theatre B has shows at 11:15 AM, 2:45 PM, 6:15 PM, 9:45 PM;
- *       Theatre C has shows at 09:30 AM, 1:00 PM, 4:30 PM, 7:45 PM, 11:00 PM;
- *       Theatre D has shows at 10:45 AM, 2:15 PM, 5:45 PM, 9:00 PM, 11:45 PM.
+ * Each theatre has 6 unique, non-overlapping showtimes per day (morning, noon, matinee, evening, prime, late night).
+ * No two theatres share the same schedule.
  */
 const DEFAULT_THEATRES = [
   {
@@ -35,7 +32,7 @@ const DEFAULT_THEATRES = [
     balconySeatPrice: 350,
     middleSeatPrice: 240,
     lowerSeatPrice: 160,
-    showtimes: ['10:00 AM', '01:30 PM', '05:00 PM', '08:30 PM', '11:15 PM'],
+    showtimes: ['09:15 AM', '11:45 AM', '02:30 PM', '05:15 PM', '08:00 PM', '10:45 PM'],
     facilities: ['IMAX Laser 3D', '12-Ch Immersive Sound', 'Plush Recliners', 'Gourmet Bar'],
     balconySeats: { rows: 3, cols: 10 },
     middleSeats: { rows: 5, cols: 12 },
@@ -50,7 +47,7 @@ const DEFAULT_THEATRES = [
     balconySeatPrice: 320,
     middleSeatPrice: 220,
     lowerSeatPrice: 150,
-    showtimes: ['11:15 AM', '02:45 PM', '06:15 PM', '09:45 PM'],
+    showtimes: ['09:45 AM', '12:15 PM', '03:00 PM', '05:45 PM', '08:30 PM', '11:15 PM'],
     facilities: ['Dolby Atmos', 'Laser 4K Projection', 'Club Seating', 'In-seat Dining'],
     balconySeats: { rows: 3, cols: 10 },
     middleSeats: { rows: 5, cols: 12 },
@@ -65,7 +62,7 @@ const DEFAULT_THEATRES = [
     balconySeatPrice: 400,
     middleSeatPrice: 280,
     lowerSeatPrice: 180,
-    showtimes: ['09:30 AM', '01:00 PM', '04:30 PM', '07:45 PM', '11:00 PM'],
+    showtimes: ['10:00 AM', '12:45 PM', '03:30 PM', '06:15 PM', '09:00 PM', '11:40 PM'],
     facilities: ['Full Leather Recliners', 'Call-a-Waiter Service', 'Dolby 7.1', 'Artisan Coffee'],
     balconySeats: { rows: 3, cols: 10 },
     middleSeats: { rows: 5, cols: 12 },
@@ -80,7 +77,7 @@ const DEFAULT_THEATRES = [
     balconySeatPrice: 300,
     middleSeatPrice: 200,
     lowerSeatPrice: 140,
-    showtimes: ['10:45 AM', '02:15 PM', '05:45 PM', '09:00 PM', '11:45 PM'],
+    showtimes: ['10:30 AM', '01:15 PM', '04:00 PM', '06:45 PM', '09:30 PM', '11:55 PM'],
     facilities: ['RGB Pure Laser', 'Dolby Surround 7.1', 'Comfort Rocker Seats'],
     balconySeats: { rows: 3, cols: 10 },
     middleSeats: { rows: 5, cols: 12 },
@@ -89,23 +86,37 @@ const DEFAULT_THEATRES = [
 ];
 
 /**
- * Ensure primary theatres exist in the database
+ * Ensure primary theatres exist in the database and their showtimes arrays are upgraded to full 6 slots
  */
 const ensureTheatresExist = async () => {
   let theatres = await Theatre.find({});
   if (theatres.length === 0) {
     theatres = await Theatre.insertMany(DEFAULT_THEATRES);
   } else {
-    // Ensure all default theatres are registered
     for (const defT of DEFAULT_THEATRES) {
-      const exists = theatres.some((t) => t.theatreId === defT.theatreId);
-      if (!exists) {
+      const existing = theatres.find((t) => t.theatreId === defT.theatreId);
+      if (!existing) {
         try {
           const created = await Theatre.create(defT);
           theatres.push(created);
         } catch (e) {
           // ignore duplicate race condition
         }
+      } else if (!existing.showtimes || existing.showtimes.length < defT.showtimes.length) {
+        // Upgrade existing theater to full 6 showtimes
+        existing.showtimes = defT.showtimes;
+        existing.facilities = defT.facilities;
+        existing.screenName = defT.screenName;
+        await Theatre.updateOne(
+          { theatreId: defT.theatreId },
+          {
+            $set: {
+              showtimes: defT.showtimes,
+              facilities: defT.facilities,
+              screenName: defT.screenName
+            }
+          }
+        );
       }
     }
   }
@@ -162,19 +173,21 @@ const buildTicketsForTheatre = (theatre) => {
 };
 
 /**
- * Auto-provision 7 days of varied, distinct showtimes for a movie across all theatres
+ * Auto-provision 7 days of varied, distinct showtimes (6 shows per day) for a movie across all theatres
  */
-const autoProvisionShowsForMovie = async (movieId, movieName = '') => {
+const autoProvisionShowsForMovie = async (movieId, movieName = '', forceRefresh = false) => {
   const theatres = await ensureTheatresExist();
   const today = new Date();
   const createdShows = [];
 
   for (let tIndex = 0; tIndex < theatres.length; tIndex++) {
     const theatre = theatres[tIndex];
-    const defaultShowtimes =
-      theatre.showtimes && theatre.showtimes.length > 0
+    const defaultObj = DEFAULT_THEATRES.find((d) => d.theatreId === theatre.theatreId);
+    const targetShowtimes =
+      defaultObj?.showtimes ||
+      (theatre.showtimes && theatre.showtimes.length >= 5
         ? theatre.showtimes
-        : DEFAULT_THEATRES[tIndex % DEFAULT_THEATRES.length].showtimes;
+        : DEFAULT_THEATRES[tIndex % DEFAULT_THEATRES.length].showtimes);
 
     const ticketsTemplate = buildTicketsForTheatre(theatre);
 
@@ -183,8 +196,7 @@ const autoProvisionShowsForMovie = async (movieId, movieName = '') => {
       dateObj.setDate(today.getDate() + d);
       const dateStr = dateObj.toISOString().split('T')[0];
 
-      for (const timeStr of defaultShowtimes) {
-        // Check if show already exists to prevent duplicate insertion
+      for (const timeStr of targetShowtimes) {
         const existing = await Show.findOne({
           movieId,
           theatreId: theatre.theatreId,
@@ -285,10 +297,12 @@ const getAllShows = async (req, res) => {
 
     let shows = await Show.find(filter).sort({ showDate: 1, showTime: 1 });
 
-    // If querying by movie and no shows or all shows are in past, auto-provision
+    // If querying by movie, ensure all 6 showtimes per theater are provisioned
     if (movieId) {
-      const upcoming = shows.filter((s) => !isShowExpired(s.showDate, s.showTime));
-      if (shows.length === 0 || upcoming.length === 0) {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const todayShows = shows.filter((s) => s.showDate === todayStr);
+
+      if (shows.length === 0 || todayShows.length < 12) {
         await autoProvisionShowsForMovie(movieId.trim());
         shows = await Show.find(filter).sort({ showDate: 1, showTime: 1 });
       }
@@ -343,10 +357,11 @@ const getShowsByMovie = async (req, res) => {
 
     let shows = await Show.find(filter).sort({ showDate: 1, showTime: 1 });
 
-    // Auto-provision 7 days of shows across distinct theatres if none exist or all are expired
-    const upcomingShows = shows.filter((s) => !isShowExpired(s.showDate, s.showTime));
+    // Auto-provision 7 days of shows across distinct theatres if count is low (e.g., old legacy 2-show data)
+    const todayStr = new Date().toISOString().split('T')[0];
+    const todayShows = shows.filter((s) => s.showDate === todayStr);
 
-    if (shows.length === 0 || upcomingShows.length === 0) {
+    if (shows.length === 0 || todayShows.length < 12) {
       await autoProvisionShowsForMovie(movieId.trim());
       shows = await Show.find(filter).sort({ showDate: 1, showTime: 1 });
     }
@@ -380,6 +395,47 @@ const getShowsByMovie = async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to fetch shows for movie'
+    });
+  }
+};
+
+/**
+ * Refresh and provision full 6 showtimes per theater for a movie
+ * POST /api/shows/refresh/:movieId
+ */
+const refreshShowsForMovie = async (req, res) => {
+  try {
+    const { movieId } = req.params;
+    if (!movieId) {
+      return res.status(400).json({ success: false, error: 'Movie ID is required' });
+    }
+
+    await autoProvisionShowsForMovie(movieId.trim(), '', true);
+
+    const shows = await Show.find({ movieId: movieId.trim() }).sort({ showDate: 1, showTime: 1 });
+    const enrichedShows = shows.map((s) => {
+      const showObj = s.toObject ? s.toObject() : { ...s };
+      return {
+        ...showObj,
+        isExpired: isShowExpired(showObj.showDate, showObj.showTime)
+      };
+    });
+
+    const theatres = await Theatre.find({});
+    const groupedTheatres = groupShowsByTheatre(enrichedShows, theatres);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Showtimes successfully refreshed and expanded to 6 shows per theater.',
+      count: enrichedShows.length,
+      shows: enrichedShows,
+      theatres: groupedTheatres
+    });
+  } catch (error) {
+    console.error('Error in refreshShowsForMovie:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to refresh showtimes'
     });
   }
 };
@@ -461,7 +517,6 @@ const addShow = async (req, res) => {
     const uniqueShowId = uuidv4();
     const adminEmail = req.admin?.email || theatre.adminEmail || req.body.adminEmail || 'admin@imovies.com';
 
-    // If movieName not passed, attempt to lookup
     let resolvedMovieName = (movieName || '').trim();
     if (!resolvedMovieName) {
       try {
@@ -572,6 +627,7 @@ module.exports = {
   getAllShows,
   getShowById,
   getShowsByMovie,
+  refreshShowsForMovie,
   addShow,
   updateShow,
   deleteShow
