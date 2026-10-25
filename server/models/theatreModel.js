@@ -67,6 +67,19 @@ const theatreSchema = new mongoose.Schema({
       type: Number,
       default: 14
     }
+  },
+  showtimes: {
+    type: [String],
+    default: ['10:00 AM', '01:30 PM', '05:00 PM', '08:30 PM']
+  },
+  screenName: {
+    type: String,
+    trim: true,
+    default: 'Audi 1'
+  },
+  facilities: {
+    type: [String],
+    default: ['4K Laser Projection', 'Dolby 7.1 Surround', 'Recliner Seating Available']
   }
 }, { timestamps: true });
 

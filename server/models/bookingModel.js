@@ -31,6 +31,11 @@ const bookingSchema = new mongoose.Schema({
     trim: true,
     default: ''
   },
+  theatreId: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   theatreName: {
     type: String,
     trim: true

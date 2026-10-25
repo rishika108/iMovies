@@ -380,6 +380,7 @@ export default function SeatSlug() {
         selectedSeats,
         movieId: show.movieId,
         movieName: movie?.movieName || movie?.title || show.theatreName,
+        theatreId: show.theatreId,
         theatreName: show.theatreName,
         showDate: show.showDate,
         showTime: show.showTime,
@@ -569,7 +570,7 @@ export default function SeatSlug() {
               {movieTitle}
             </h3>
             <div className="text-secondary small d-flex flex-wrap align-items-center gap-3">
-              <span><strong>Theatre:</strong> {show.theatreName}</span>
+              <span><strong>Theatre:</strong> {show.theatreName} {show.screenName ? `(${show.screenName})` : ''}</span>
               <span>•</span>
               <span><FontAwesomeIcon icon={faCalendarAlt} className="me-1" />{show.showDate}</span>
               <span>•</span>

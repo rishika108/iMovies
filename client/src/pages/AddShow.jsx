@@ -118,6 +118,16 @@ export default function AddShow() {
     const theatreName = chosenTheatre?.theatreName || 'Selected Theatre';
     const showId = `sh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
+    // Convert 24h format (HH:MM) to 12h AM/PM if entered from time input
+    let formattedTime = showTime.trim();
+    if (/^\d{1,2}:\d{2}$/.test(formattedTime)) {
+      const [hStr, mStr] = formattedTime.split(':');
+      let h = parseInt(hStr, 10);
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      formattedTime = `${String(h).padStart(2, '0')}:${mStr} ${ampm}`;
+    }
+
     setLoading(true);
 
     const payload = {
@@ -126,8 +136,9 @@ export default function AddShow() {
       movieName,
       theatreId: selectedTheatreId,
       theatreName,
+      screenName: chosenTheatre?.screenName || 'Audi 1',
       showDate,
-      showTime,
+      showTime: formattedTime,
       adminEmail,
       tickets: {}
     };
@@ -310,6 +321,34 @@ export default function AddShow() {
                     required
                   />
                 </div>
+
+                {/* Quick Theatre Showtime Slots */}
+                {(() => {
+                  const activeT = theatres.find((t) => (t.theatreId || t._id) === selectedTheatreId);
+                  const slots = activeT?.showtimes || ['10:00 AM', '01:30 PM', '05:00 PM', '08:30 PM', '11:15 PM'];
+                  return (
+                    <div className="mt-2">
+                      <span className="text-secondary small">Click to quick-fill theater schedule slot:</span>
+                      <div className="d-flex flex-wrap gap-1 mt-1">
+                        {slots.map((slot) => (
+                          <button
+                            key={slot}
+                            type="button"
+                            onClick={() => setShowTime(slot)}
+                            className={`btn btn-sm py-1 px-2 rounded-2 ${
+                              showTime === slot
+                                ? 'btn-danger fw-bold'
+                                : 'btn-outline-secondary text-light'
+                            }`}
+                            style={{ fontSize: '0.72rem' }}
+                          >
+                            {slot}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 

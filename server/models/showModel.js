@@ -18,6 +18,11 @@ const showSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  movieName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   theatreId: {
     type: String,
     required: true,
@@ -27,6 +32,11 @@ const showSchema = new mongoose.Schema({
     type: String,
     required: true,
     trim: true
+  },
+  screenName: {
+    type: String,
+    trim: true,
+    default: 'Audi 1'
   },
   showDate: {
     type: String,
@@ -43,5 +53,8 @@ const showSchema = new mongoose.Schema({
     default: {}
   }
 }, { timestamps: true });
+
+showSchema.index({ movieId: 1, showDate: 1, theatreId: 1 });
+showSchema.index({ theatreId: 1, showDate: 1, showTime: 1 });
 
 module.exports = mongoose.model('Show', showSchema);

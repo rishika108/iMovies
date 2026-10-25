@@ -260,6 +260,7 @@ const createBooking = async (req, res) => {
       showId,
       movieId: movieId || show.movieId,
       movieName: movieName || show.theatreName || 'Movie',
+      theatreId: req.body.theatreId || show.theatreId || '',
       theatreName: theatreName || show.theatreName,
       showDate: showDate || show.showDate,
       showTime: showTime || show.showTime,

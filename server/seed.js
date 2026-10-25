@@ -211,12 +211,18 @@ async function seed() {
 
   const movieDocs = await Movie.insertMany(movies);
 
+  // ── Seed Theatres with Distinct Multi-Showtime Schedules ────────────────────
+  console.log('🏛️  Seeding theatres with distinct multi-showtime schedules…');
+  const { DEFAULT_THEATRES } = require('./controllers/showController');
+  const theatreDocs = await Theatre.insertMany(DEFAULT_THEATRES);
+
   console.log('');
   console.log('='.repeat(55));
   console.log('  iMovies Seed Complete!');
   console.log('='.repeat(55));
-  console.log(`  Movies created  : ${movieDocs.length}`);
-  console.log(`  Demo admin      : admin@imovies.com / Admin@123`);
+  console.log(`  Movies created    : ${movieDocs.length}`);
+  console.log(`  Theatres created  : ${theatreDocs.length}`);
+  console.log(`  Demo admin        : admin@imovies.com / Admin@123`);
   console.log('='.repeat(55));
   console.log('');
   console.log('  Next steps:');
