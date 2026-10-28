@@ -1,12 +1,46 @@
-const nodemailer = require('nodemailer');
+/**
+ * mailer.js
+ * Centralized Mail Utility Service for iMovies
+ * Supports Nodemailer Gmail SMTP and Brevo with Dev Mode OTP Fallback
+ */
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER || 'admin2209verma@gmail.com',
-    pass: process.env.EMAIL_PASS || 'Ritik@0922'
+const nodemailer = require('nodemailer');
+const {
+  sendVerificationEmail,
+  sendOtpEmail,
+  sendPasswordResetEmail,
+  sendBookingConfirmationEmail
+} = require('../services/emailService');
+
+const isConfigured = (val) => {
+  if (!val || typeof val !== 'string') return false;
+  const lower = val.trim().toLowerCase();
+  return (
+    lower.length > 5 &&
+    !lower.includes('your_') &&
+    !lower.includes('your-') &&
+    !lower.includes('example.com')
+  );
+};
+
+// Safe nodemailer transporter with timeout configuration
+let transporter = null;
+if (isConfigured(process.env.EMAIL_USER) && isConfigured(process.env.EMAIL_PASS)) {
+  try {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER.trim(),
+        pass: process.env.EMAIL_PASS.trim()
+      },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000
+    });
+  } catch (err) {
+    console.warn('[mailer.js] Could not initialize nodemailer transporter:', err.message);
   }
-});
+}
 
 /**
  * Send booking confirmation email with styled HTML ticket details
@@ -14,183 +48,7 @@ const transporter = nodemailer.createTransport({
  * @param {object} bookingDetails - Booking information
  */
 const sendBookingConfirmation = async (to, bookingDetails) => {
-  const {
-    bookingId,
-    movieName,
-    movie,
-    theatreName,
-    showDate,
-    showTime,
-    selectedSeats,
-    seats,
-    totalAmount,
-    amount
-  } = bookingDetails;
-
-  const displayMovie = movieName || movie || 'Movie';
-  const displaySeats = Array.isArray(selectedSeats)
-    ? selectedSeats.join(', ')
-    : (seats || 'N/A');
-  const displayAmount = totalAmount !== undefined ? totalAmount : (amount !== undefined ? amount : 0);
-  const displayTheatre = theatreName || 'iMovies Cinema';
-
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Booking Confirmation - iMovies</title>
-      <style>
-        body {
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          background-color: #0f172a;
-          margin: 0;
-          padding: 24px;
-          color: #f8fafc;
-        }
-        .container {
-          max-width: 600px;
-          margin: 0 auto;
-          background: #1e293b;
-          border-radius: 16px;
-          overflow: hidden;
-          box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-          border: 1px solid #334155;
-        }
-        .header {
-          background: linear-gradient(135deg, #e11d48, #be123c);
-          padding: 32px 24px;
-          text-align: center;
-        }
-        .header h1 {
-          margin: 0;
-          font-size: 28px;
-          color: #ffffff;
-          letter-spacing: 1px;
-        }
-        .header p {
-          margin: 8px 0 0;
-          color: #ffe4e6;
-          font-size: 15px;
-        }
-        .content {
-          padding: 32px 24px;
-        }
-        .ticket-card {
-          background: #0f172a;
-          border: 2px dashed #475569;
-          border-radius: 12px;
-          padding: 24px;
-          margin-bottom: 24px;
-        }
-        .ticket-row {
-          display: flex;
-          justify-content: space-between;
-          padding: 10px 0;
-          border-bottom: 1px solid #1e293b;
-        }
-        .ticket-row:last-child {
-          border-bottom: none;
-        }
-        .label {
-          color: #94a3b8;
-          font-size: 14px;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-        .value {
-          color: #f1f5f9;
-          font-weight: 600;
-          font-size: 15px;
-          text-align: right;
-        }
-        .highlight {
-          color: #f43f5e;
-          font-size: 18px;
-          font-weight: 700;
-        }
-        .seats-badge {
-          background-color: #3b82f6;
-          color: #ffffff;
-          padding: 4px 10px;
-          border-radius: 6px;
-          display: inline-block;
-          font-weight: 600;
-        }
-        .footer {
-          text-align: center;
-          padding: 20px;
-          color: #64748b;
-          font-size: 13px;
-          background: #111827;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>iMovies</h1>
-          <p>Booking Confirmed! Enjoy your movie experience.</p>
-        </div>
-        <div class="content">
-          <div class="ticket-card">
-            <div class="ticket-row">
-              <span class="label">Booking ID</span>
-              <span class="value" style="font-family: monospace; color: #38bdf8;">${bookingId}</span>
-            </div>
-            <div class="ticket-row">
-              <span class="label">Movie</span>
-              <span class="value highlight">${displayMovie}</span>
-            </div>
-            <div class="ticket-row">
-              <span class="label">Theatre</span>
-              <span class="value">${displayTheatre}</span>
-            </div>
-            <div class="ticket-row">
-              <span class="label">Date</span>
-              <span class="value">${showDate}</span>
-            </div>
-            <div class="ticket-row">
-              <span class="label">Show Time</span>
-              <span class="value">${showTime}</span>
-            </div>
-            <div class="ticket-row">
-              <span class="label">Seats</span>
-              <span class="value"><span class="seats-badge">${displaySeats}</span></span>
-            </div>
-            <div class="ticket-row" style="margin-top: 8px; border-top: 2px solid #334155; padding-top: 14px;">
-              <span class="label" style="font-size: 16px; color: #f1f5f9; font-weight: bold;">Total Amount</span>
-              <span class="value" style="font-size: 20px; color: #22c55e;">₹${displayAmount}</span>
-            </div>
-          </div>
-          <p style="color: #94a3b8; font-size: 14px; text-align: center; margin: 0;">
-            Please present this booking confirmation or Booking ID at the cinema entrance.
-          </p>
-        </div>
-        <div class="footer">
-          <p>&copy; ${new Date().getFullYear()} iMovies Inc. All rights reserved.</p>
-          <p>Need help? Contact support@imovies.com</p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
-
-  const mailOptions = {
-    from: `"iMovies" <${process.env.EMAIL_USER || 'no-reply@imovies.com'}>`,
-    to,
-    subject: `Booking Confirmed: ${displayMovie} [${bookingId}]`,
-    html: htmlContent
-  };
-
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    return { success: true, messageId: info.messageId };
-  } catch (error) {
-    console.error('Failed to send booking confirmation email:', error);
-    return { success: false, error: error.message };
-  }
+  return sendBookingConfirmationEmail(to, bookingDetails);
 };
 
 /**
@@ -334,6 +192,11 @@ const sendReminder = async (to, showDetails) => {
     </html>
   `;
 
+  if (!transporter) {
+    console.log(`[mailer.js] Simulated reminder email to ${to} for show: ${displayMovie}`);
+    return { success: true, simulated: true };
+  }
+
   const mailOptions = {
     from: `"iMovies" <${process.env.EMAIL_USER || 'no-reply@imovies.com'}>`,
     to,
@@ -353,5 +216,8 @@ const sendReminder = async (to, showDetails) => {
 module.exports = {
   transporter,
   sendBookingConfirmation,
-  sendReminder
+  sendReminder,
+  sendVerificationEmail,
+  sendOtpEmail,
+  sendPasswordResetEmail
 };

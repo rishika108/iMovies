@@ -68,7 +68,7 @@ export default function CheckoutButton({
       }
 
       const { orderId, amount: amountInPaise, currency, key } = orderRes.data;
-      const razorpayKey = key || import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_TpNJvdvA0P93UL';
+      const razorpayKey = key || import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_TpQ7mg5jyDRTt0';
 
       // Step 4: Razorpay Options with Native UPI & QR Priority Configuration
       const options = {

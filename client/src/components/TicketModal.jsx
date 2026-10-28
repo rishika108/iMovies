@@ -425,6 +425,15 @@ export default function TicketModal({ booking, onClose }) {
               <FontAwesomeIcon icon={copied ? faCheck : faCopy} />
               <span>{copied ? 'Copied Public URL!' : 'Share / Copy Ticket URL'}</span>
             </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-success px-3 rounded-pill fw-semibold d-inline-flex align-items-center gap-2"
+              style={{ backgroundColor: '#25D366', borderColor: '#25D366', color: '#ffffff' }}
+              onClick={() => shareTicketToWhatsApp(booking)}
+              title="Share ticket directly via WhatsApp"
+            >
+              <span>?? Share to WhatsApp</span>
+            </button>
             <div className="d-flex gap-2">
               <button
                 type="button"

@@ -15,7 +15,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'imovies_super_secret_jwt_key_2024'
  * Validates fields, checks duplicates
  * Hashes password
  * Generates 6-digit OTP & verification token
- * Sends Brevo verification email
+ * Sends Brevo / Nodemailer verification email
  * Returns requireVerification: true
  */
 const registerUser = async (req, res) => {
@@ -72,18 +72,30 @@ const registerUser = async (req, res) => {
         existingUser.verificationTokenExpires = expiry;
         await existingUser.save();
 
-        // Send Brevo verification email asynchronously
-        sendVerificationEmail(normalizedEmail, {
-          username: normalizedUsername,
-          verificationToken,
-          otp
-        }).catch((err) => console.error('[registerUser] Verification email dispatch error:', err.message));
+        // Send verification email with explicit logging and dev mode fallback
+        console.log('Sending OTP email to:', normalizedEmail);
+        try {
+          const emailResult = await sendVerificationEmail(normalizedEmail, {
+            username: normalizedUsername,
+            verificationToken,
+            otp
+          });
+          if (!emailResult?.success && process.env.NODE_ENV !== 'production') {
+            console.log('DEV MODE OTP:', otp);
+          }
+        } catch (err) {
+          console.error('[registerUser] Verification email dispatch error:', err.message);
+          if (process.env.NODE_ENV !== 'production') {
+            console.log('DEV MODE OTP:', otp);
+          }
+        }
 
         return res.status(200).json({
           success: true,
           requireVerification: true,
           email: normalizedEmail,
-          message: 'A fresh 6-digit OTP has been sent to your email. Please verify to activate your account.'
+          message: 'A fresh 6-digit OTP has been sent to your email. Please verify to activate your account.',
+          ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
         });
       }
 
@@ -111,18 +123,30 @@ const registerUser = async (req, res) => {
 
     await newUser.save();
 
-    // Send Brevo verification email containing 6-digit OTP and direct activation link
-    sendVerificationEmail(normalizedEmail, {
-      username: normalizedUsername,
-      verificationToken,
-      otp
-    }).catch((err) => console.error('[registerUser] Verification email dispatch error:', err.message));
+    // Send verification email containing 6-digit OTP and direct activation link
+    console.log('Sending OTP email to:', normalizedEmail);
+    try {
+      const emailResult = await sendVerificationEmail(normalizedEmail, {
+        username: normalizedUsername,
+        verificationToken,
+        otp
+      });
+      if (!emailResult?.success && process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', otp);
+      }
+    } catch (err) {
+      console.error('[registerUser] Verification email dispatch error:', err.message);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', otp);
+      }
+    }
 
     return res.status(201).json({
       success: true,
       requireVerification: true,
       email: normalizedEmail,
-      message: 'Account created! Please enter the 6-digit verification code sent to your email.'
+      message: 'Account created! Please enter the 6-digit verification code sent to your email.',
+      ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
     });
   } catch (error) {
     console.error('Error in registerUser / signup:', error);
@@ -265,6 +289,10 @@ const verifyEmailToken = async (req, res) => {
     }
 
     if (user.isVerified) {
+      if (req.method === 'GET') {
+        const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+        return res.redirect(`${clientUrl}/login?verified=true&email=${encodeURIComponent(normalizedEmail)}`);
+      }
       return res.status(200).json({ success: true, message: 'Account is already verified.' });
     }
 
@@ -339,15 +367,27 @@ const resendVerificationOtp = async (req, res) => {
     user.verificationTokenExpires = expiry;
     await user.save();
 
-    sendVerificationEmail(normalizedEmail, {
-      username: user.username,
-      verificationToken,
-      otp
-    }).catch((err) => console.error('[resendVerificationOtp] Email error:', err.message));
+    console.log('Sending OTP email to:', normalizedEmail);
+    try {
+      const emailResult = await sendVerificationEmail(normalizedEmail, {
+        username: user.username,
+        verificationToken,
+        otp
+      });
+      if (!emailResult?.success && process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', otp);
+      }
+    } catch (err) {
+      console.error('[resendVerificationOtp] Email error:', err.message);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', otp);
+      }
+    }
 
     return res.status(200).json({
       success: true,
-      message: 'A fresh 6-digit verification code has been dispatched to your email.'
+      message: 'A fresh 6-digit verification code has been dispatched to your email.',
+      ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
     });
   } catch (error) {
     console.error('Error in resendVerificationOtp:', error);
@@ -403,17 +443,29 @@ const loginUser = async (req, res) => {
       user.verificationTokenExpires = expiry;
       await user.save();
 
-      sendVerificationEmail(user.email, {
-        username: user.username,
-        verificationToken,
-        otp
-      }).catch((err) => console.error('[loginUser] Verification email error:', err.message));
+      console.log('Sending OTP email to:', user.email);
+      try {
+        const emailResult = await sendVerificationEmail(user.email, {
+          username: user.username,
+          verificationToken,
+          otp
+        });
+        if (!emailResult?.success && process.env.NODE_ENV !== 'production') {
+          console.log('DEV MODE OTP:', otp);
+        }
+      } catch (err) {
+        console.error('[loginUser] Verification email error:', err.message);
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('DEV MODE OTP:', otp);
+        }
+      }
 
       return res.status(403).json({
         success: false,
         requireVerification: true,
         email: user.email,
-        error: 'Your email address is not verified yet. We just sent a fresh 6-digit OTP to your inbox.'
+        error: 'Your email address is not verified yet. We just sent a fresh 6-digit OTP to your inbox.',
+        ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {})
       });
     }
 
@@ -452,7 +504,7 @@ const loginUser = async (req, res) => {
 /**
  * Forgot Password Request
  * POST /api/auth/forgot-password
- * Generates recovery OTP and reset link, sending via Brevo
+ * Generates recovery OTP and reset link, sending via Brevo / Nodemailer
  */
 const forgotPassword = async (req, res) => {
   try {
@@ -481,17 +533,28 @@ const forgotPassword = async (req, res) => {
     user.resetPasswordExpires = expiry;
     await user.save();
 
-    // Send Brevo recovery email
-    sendPasswordResetEmail(normalizedEmail, {
-      username: user.username,
-      resetToken,
-      otp: resetOtp
-    }).catch((err) => console.error('[forgotPassword] Reset email dispatch error:', err.message));
+    console.log('Sending OTP email to:', normalizedEmail);
+    try {
+      const emailResult = await sendPasswordResetEmail(normalizedEmail, {
+        username: user.username,
+        resetToken,
+        otp: resetOtp
+      });
+      if (!emailResult?.success && process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', resetOtp);
+      }
+    } catch (err) {
+      console.error('[forgotPassword] Reset email dispatch error:', err.message);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('DEV MODE OTP:', resetOtp);
+      }
+    }
 
     return res.status(200).json({
       success: true,
       email: normalizedEmail,
-      message: 'Password reset OTP and recovery link have been sent to your email.'
+      message: 'Password reset OTP and recovery link have been sent to your email.',
+      ...(process.env.NODE_ENV !== 'production' ? { devOtp: resetOtp } : {})
     });
   } catch (error) {
     console.error('Error in forgotPassword:', error);
@@ -845,7 +908,6 @@ const validateAdminToken = async (req, res) => {
     });
   }
 };
-
 
 /**
  * Change password for authenticated user

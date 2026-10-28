@@ -127,6 +127,10 @@ export default function Login() {
         setShowOtpView(true);
         setResendCountdown(30);
         setCanResend(false);
+        if (err.response.data.devOtp) {
+          setOtpCode(err.response.data.devOtp);
+          toast.info(`🔧 [DEV MODE] Auto-filled OTP: ${err.response.data.devOtp}`);
+        }
         toast.warning(
           err.response.data.error ||
             'Your account requires email verification. We just sent a 6-digit OTP to your email.'
@@ -188,6 +192,10 @@ export default function Login() {
       setCanResend(false);
       setResendCountdown(30);
       const res = await API.post('/auth/resend-otp', { email: otpEmail });
+      if (res.data?.devOtp) {
+        setOtpCode(res.data.devOtp);
+        toast.info(`🔧 [DEV MODE] Fresh OTP: ${res.data.devOtp}`);
+      }
       toast.success(res.data?.message || 'A fresh code has been sent to your email.');
     } catch (err) {
       setCanResend(true);
@@ -210,6 +218,10 @@ export default function Login() {
       });
 
       if (res.data && res.data.success) {
+        if (res.data.devOtp) {
+          setForgotOtp(res.data.devOtp);
+          toast.info(`🔧 [DEV MODE] Reset Code: ${res.data.devOtp}`);
+        }
         toast.success(res.data.message || 'Reset code sent to your email.');
         setForgotModal('reset');
       }

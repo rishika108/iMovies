@@ -406,7 +406,7 @@ export default function SeatSlug() {
       }
 
       const { orderId, amount, currency, key } = orderRes.data;
-      const razorpayKey = key || import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_TpNJvdvA0P93UL';
+      const razorpayKey = key || import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_TpQ7mg5jyDRTt0';
       const parsedUser = JSON.parse(localStorage.getItem('imovies-user') || '{}');
 
       // Step 4: Launch Razorpay Checkout Modal

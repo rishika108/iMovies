@@ -96,10 +96,19 @@ export default function Register() {
       });
 
       if (response.data && response.data.success) {
-        setRegisteredEmail(email.trim().toLowerCase());
+        const cleanEmail = email.trim().toLowerCase();
+        setRegisteredEmail(cleanEmail);
+        localStorage.setItem('pendingVerificationEmail', cleanEmail);
         setStep('otp');
         setResendCountdown(30);
         setCanResend(false);
+
+        // Dev Mode OTP Auto-Populate & Notice
+        if (response.data.devOtp) {
+          setOtp(response.data.devOtp);
+          toast.info(`[Dev Mode] Generated OTP: ${response.data.devOtp}`, { autoClose: 8000 });
+        }
+
         toast.info(
           response.data.message ||
             'Verification code sent! Please check your email inbox to activate your account.'
@@ -138,6 +147,7 @@ export default function Register() {
 
       if (response.data && response.data.success) {
         toast.success(response.data.message || '🎉 Account verified successfully! Welcome to iMovies.');
+        localStorage.removeItem('pendingVerificationEmail');
         if (response.data.token) {
           localStorage.setItem('imovies-user-token', response.data.token);
           localStorage.setItem(
@@ -171,6 +181,11 @@ export default function Register() {
       setResendCountdown(30);
       const res = await API.post('/auth/resend-otp', { email: registeredEmail });
       toast.success(res.data?.message || 'A fresh verification OTP has been sent to your email.');
+
+      if (res.data?.devOtp) {
+        setOtp(res.data.devOtp);
+        toast.info(`[Dev Mode] Fresh OTP: ${res.data.devOtp}`, { autoClose: 8000 });
+      }
     } catch (err) {
       setCanResend(true);
       const errorMessage = err.response?.data?.error || 'Failed to resend code. Please try again.';
@@ -418,6 +433,16 @@ export default function Register() {
                   <FontAwesomeIcon icon={faRotateRight} className="me-1" />
                   {canResend ? 'Resend Code' : `Resend in ${resendCountdown}s`}
                 </button>
+              </div>
+
+              {/* Direct Link to /verify-email if preferred */}
+              <div className="mt-3 pt-2 text-center">
+                <Link
+                  to={`/verify-email?email=${encodeURIComponent(registeredEmail)}`}
+                  className="text-secondary small text-decoration-none hover-white"
+                >
+                  Open Dedicated Verification Page →
+                </Link>
               </div>
             </div>
           )}

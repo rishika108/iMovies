@@ -16,6 +16,7 @@
     "dotenv": "^16.6.1",
     "express": "^4.22.3",
     "jsonwebtoken": "^9.0.2",
+    "mongodb-memory-server": "^11.3.0",
     "mongoose": "^8.3.2",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.13",
