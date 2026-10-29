@@ -233,3 +233,10 @@ npm start
 - ✅ **WhatsApp Sharing**: Tested with emoji formatted string generation and green action buttons.
 - ✅ **Admin Transactions & Refunds**: Data table with live metrics and `/api/admin/refund/:paymentId` endpoint.
 - ✅ **Real-Time Locking & Sockets**: 10-minute hold lock with timer countdown and Socket.io broadcasts.
+
+---
+
+## 👤 Author & Maintainer
+
+Maintained and developed by **[rishika108](https://github.com/rishika108)**.
+
